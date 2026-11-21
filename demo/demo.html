@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Track 1 demo</title>
+<style>
+  :root {
+    --bg: #0b1019; --panel: #131a27; --panel2: #1a2334; --line: #27334a; --text: #e9eef7; --muted: #93a0b8;
+    --accent: #6ea8ff; --close: #3fd08f; --rfi: #f6b94c; --esc: #ff6e6e;
+    --mono: "Cascadia Code", "Cascadia Mono", Consolas, monospace;
+  }
+  html, body { margin: 0; height: 100%; background: #05080d; overflow: hidden; }
+  #stage {
+    position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; overflow: hidden; transform-origin: 0 0;
+    background: radial-gradient(1300px 760px at 12% -12%, #172640 0%, var(--bg) 62%);
+    color: var(--text); font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  }
+  .scene { position: absolute; inset: 0; display: none; }
+  .topbar { position: absolute; left: 96px; right: 96px; top: 46px; display: flex; justify-content: space-between;
+    font-size: 19px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+  h2.head { position: absolute; left: 96px; top: 100px; margin: 0; font-size: 54px; font-weight: 650; letter-spacing: -.01em; }
+  .abs { position: absolute; }
+  .mono { font-family: var(--mono); }
+  .muted { color: var(--muted); }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; box-sizing: border-box; }
+  .pill { display: inline-block; padding: 9px 20px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel);
+    font-size: 23px; color: var(--text); margin-right: 12px; }
+  .tag { display: inline-block; padding: 5px 14px; border-radius: 8px; font-weight: 700; font-size: 22px; letter-spacing: .04em; }
+  .tag.close { background: rgba(63, 208, 143, .16); color: var(--close); }
+  .tag.rfi { background: rgba(246, 185, 76, .16); color: var(--rfi); }
+  .tag.esc { background: rgba(255, 110, 110, .16); color: var(--esc); }
+  .c-close { color: var(--close); } .c-rfi { color: var(--rfi); } .c-esc { color: var(--esc); } .c-accent { color: var(--accent); }
+
+  /* Elements lit by the narration: --p goes 0 to 1 when introduced, --f is 1 only while in focus. */
+  .lit { opacity: calc(.34 + .66 * var(--p, 0));
+    border-color: color-mix(in srgb, var(--accent) calc(var(--f, 0) * 100%), var(--line));
+    box-shadow: 0 0 0 calc(var(--f, 0) * 3px) rgba(110, 168, 255, .28); }
+
+  #caption { position: absolute; left: 0; right: 0; bottom: 42px; display: flex; justify-content: center; }
+  #caption span { max-width: 1500px; background: rgba(5, 8, 13, .86); border: 1px solid var(--line); border-radius: 14px;
+    padding: 13px 28px; font-size: 30px; line-height: 1.35; text-align: center; }
+  #progress { position: absolute; left: 0; bottom: 0; height: 5px; width: 0; background: var(--accent); }
+  #play { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0, 0, 0, .55);
+    color: #fff; font: 600 28px "Segoe UI", sans-serif; cursor: pointer; z-index: 5; }
+
+  /* Title */
+  #scene-title h1 { position: absolute; left: 96px; top: 186px; margin: 0; font-size: 112px; line-height: 1.04; font-weight: 700; letter-spacing: -.025em; }
+  .verdict-card { position: absolute; top: 590px; width: 552px; height: 196px; padding: 30px 34px; }
+  .verdict-card .name { font-size: 44px; font-weight: 750; letter-spacing: .02em; }
+  .verdict-card .what { margin-top: 12px; font-size: 27px; line-height: 1.35; color: var(--text); }
+
+  /* Run */
+  .terminal { left: 96px; top: 214px; width: 900px; height: 392px; background: #070b12; }
+  .terminal .bar { height: 46px; border-bottom: 1px solid var(--line); display: flex; align-items: center; padding-left: 20px; gap: 9px; }
+  .terminal .bar i { width: 13px; height: 13px; border-radius: 50%; background: #2c3950; display: block; }
+  .terminal pre { margin: 0; padding: 26px 28px; font: 20px/1.75 var(--mono); color: #cfd8e8; white-space: pre-wrap; }
+  .prompt { color: var(--close); }
+  .json { left: 1036px; top: 214px; width: 788px; padding: 24px 16px; font: 21px/1.55 var(--mono); }
+  .json .row { padding: 7px 16px; border-radius: 10px; border: 1px solid transparent;
+    background: rgba(110, 168, 255, calc(var(--f, 0) * .13)); border-color: rgba(110, 168, 255, calc(var(--f, 0) * .7)); }
+  .json .k { color: #9cc3ff; } .json .s { color: #e6d6a8; } .json .brace { padding: 0 16px; color: var(--muted); }
+  .stat { position: absolute; top: 646px; width: 284px; height: 150px; padding: 22px 24px; }
+  .stat b { display: block; font-size: 42px; font-weight: 700; }
+  .stat span { display: block; margin-top: 6px; font-size: 21px; line-height: 1.3; color: var(--muted); }
+
+  /* Pipeline */
+  .step { position: absolute; top: 300px; width: 408px; height: 452px; padding: 28px 30px; }
+  .step .n { font-size: 22px; font-weight: 700; color: var(--accent); letter-spacing: .1em; }
+  .step h3 { margin: 8px 0 4px; font-size: 36px; font-weight: 680; }
+  .step .file { font: 19px var(--mono); color: var(--muted); }
+  .step p { margin: 20px 0 0; font-size: 24px; line-height: 1.42; color: #cdd6e6; }
+  .ladder div { margin-top: 14px; padding: 12px 18px; border-radius: 12px; font-size: 23px; background: var(--panel2); border: 1px solid var(--line); }
+  .ladder b { font-size: 24px; letter-spacing: .03em; }
+
+  /* Case */
+  .case-main { left: 96px; top: 206px; width: 1076px; height: 694px; padding: 28px 34px; }
+  .case-id { font: 22px var(--mono); color: var(--muted); }
+  .case-title { margin-top: 6px; font-size: 32px; font-weight: 660; }
+  table.match { width: 100%; margin-top: 22px; border-collapse: collapse; font-size: 24px; }
+  table.match th { text-align: left; font-size: 19px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted);
+    padding: 0 12px 12px; }
+  table.match td { padding: 15px 12px; border-top: 1px solid var(--line); }
+  table.match td.label { width: 150px; color: var(--muted); font-size: 21px; }
+  table.match td.tick { width: 44px; text-align: center; color: var(--close); font-size: 30px; font-weight: 700; }
+  .outcome { position: absolute; left: 34px; right: 34px; bottom: 28px; padding: 18px 24px; border-radius: 14px; font-size: 25px;
+    background: rgba(63, 208, 143, .1); border: 1px solid rgba(63, 208, 143, .5); }
+  .variant { left: 1204px; width: 620px; height: 331px; padding: 26px 30px; }
+  .variant .fact { margin-top: 12px; font-size: 25px; line-height: 1.4; }
+  .variant .result { position: absolute; left: 30px; right: 30px; bottom: 24px; font-size: 22px; line-height: 1.4; color: #cdd6e6; }
+
+  /* Decisions */
+  .decision { position: absolute; width: 848px; height: 322px; padding: 28px 34px; }
+  .decision .n { position: absolute; right: 30px; top: 18px; font-size: 76px; font-weight: 750; color: rgba(110, 168, 255, .22); }
+  .decision h3 { margin: 0; font-size: 38px; font-weight: 680; }
+  .decision p { margin: 14px 0 0; font-size: 24.5px; line-height: 1.42; color: #cdd6e6; max-width: 720px; }
+  .decision .proof { position: absolute; left: 34px; right: 34px; bottom: 24px; font-size: 21px; line-height: 1.4; color: var(--muted);
+    padding-top: 13px; border-top: 1px solid var(--line); }
+
+  /* Reader */
+  .flow { position: absolute; left: 96px; top: 226px; width: 1728px; display: flex; align-items: stretch; }
+  .flow .box { flex: 1; height: 262px; padding: 24px 24px; }
+  .flow .box h4 { margin: 0; font-size: 28px; font-weight: 680; line-height: 1.2; }
+  .flow .box p { margin: 14px 0 0; font-size: 21.5px; line-height: 1.42; color: #cdd6e6; }
+  .flow .arrow { width: 44px; display: flex; align-items: center; justify-content: center; font-size: 30px; color: var(--muted); }
+  .closing { left: 96px; top: 540px; width: 1728px; height: 340px; padding: 34px 40px; }
+  .closing .field { display: inline-block; margin-right: 14px; padding: 10px 22px; border-radius: 12px; background: var(--panel2);
+    border: 1px solid var(--line); font: 26px var(--mono); color: #9cc3ff; }
+</style>
+</head>
+<body>
+<div id="stage">
+
+  <!-- 1. Title -->
+  <section class="scene" id="scene-title">
+    <div class="topbar"><span>FinCrime Hackathon 2026 · Track 1</span><span>Stop suspicious payments</span></div>
+    <h1 data-at="0.25">Evidence-first<br>alert triage</h1>
+    <div class="abs" style="left:100px; top:470px; font-size:34px; color:#cdd6e6" data-at="s1">
+      It reviews the cases that monitoring rules raise, as an analyst would.
+    </div>
+    <div class="abs" style="left:1130px; top:236px; width:694px" data-at="s1+0.8">
+      <div class="muted" style="font-size:21px; letter-spacing:.1em; text-transform:uppercase; margin-bottom:16px">Four institutions, one runner</div>
+      <span class="pill">Bank</span><span class="pill">E-money</span><span class="pill">Investment</span><span class="pill" style="margin-right:0">Payments/FX</span>
+      <div class="muted" style="font-size:23px; margin-top:18px">4,000 development cases · 800 unseen at evaluation</div>
+    </div>
+    <div class="panel verdict-card" style="left:96px" data-at="s1+3.3">
+      <div class="name c-close">CLOSE</div><div class="what">The evidence explains the activity behind every alert.</div>
+    </div>
+    <div class="panel verdict-card" style="left:684px" data-at="s1+4.0">
+      <div class="name c-rfi">RFI</div><div class="what">No suspicion, and one specific document would settle it.</div>
+    </div>
+    <div class="panel verdict-card" style="left:1272px" data-at="s1+5.0">
+      <div class="name c-esc">ESCALATE</div><div class="what">Suspicion: refer to the MLRO without asking the customer.</div>
+    </div>
+    <div class="abs muted" style="left:100px; top:826px; font-size:26px" data-at="s1+6.2">
+      Each verdict cites the documents, transactions and list entries it relied on.
+    </div>
+  </section>
+
+  <!-- 2. Run -->
+  <section class="scene" id="scene-run">
+    <div class="topbar"><span>Track 1 · Alert triage</span><span>1 · Running it</span></div>
+    <h2 class="head">One command per institution</h2>
+    <div class="abs panel terminal" data-at="0.2">
+      <div class="bar"><i></i><i></i><i></i></div>
+      <pre><span class="prompt">$ </span><span data-type data-at="0.6" data-cps="46">time system/run institutions/payments_fx output/payments_fx.jsonl</span>
+<span data-at="s1">
+real    0m2.359s</span>
+<span data-at="s1+0.9"><span class="prompt">$ </span></span><span data-type data-at="s1+0.9" data-cps="40">wc -l output/payments_fx.jsonl</span>
+<span data-at="s1+1.9">1000 output/payments_fx.jsonl</span></pre>
+    </div>
+    <div class="panel stat" style="left:96px" data-at="s1+0.3"><b>~2 s</b><span>for 1,000 cases, measured on this laptop</span></div>
+    <div class="panel stat" style="left:404px" data-at="s1+0.7"><b>0</b><span>installs at evaluation: Node.js only</span></div>
+    <div class="panel stat" style="left:712px" data-at="s1+1.1"><b>1 : 1</b><span>one JSON line per case, in input order</span></div>
+    <div class="abs panel json" data-at="s2-0.2">
+      <div class="brace">{</div>
+      <div class="row"><span class="k">"case_id"</span>: <span class="s">"PX-CS118701"</span>,</div>
+      <div class="row"><span class="k">"alert_ids"</span>: [<span class="s">"PX-AL5797903"</span>],</div>
+      <div class="row" data-focus="s2+0.9,s2+1.8"><span class="k">"verdict"</span>: <span class="s c-close">"CLOSE"</span>,</div>
+      <div class="row" data-focus="s2+1.8,s2+2.8"><span class="k">"reason_code"</span>: <span class="s">"INVOICE_MATCHES"</span>,</div>
+      <div class="row" data-focus="s2+2.8,s2+3.9"><span class="k">"reason"</span>: <span class="s">"INV-5129 from Oakhurst Dried Fruits Co bills Brackden Fine Foods Ltd under INV 76621 and matches the payee, amount and date of £33,173.83 to Oakhurst Dried Fruits Co on 2026-09-15 (PX-T717987710). Together the evidence explains all the activity behind TM06, so the held payment can be released."</span>,</div>
+      <div class="row" data-focus="s2+3.9,e2+0.6"><span class="k">"evidence"</span>: [<span class="s">"INV-5129"</span>, <span class="s">"CON-2862"</span>, <span class="s">"PX-T717987710"</span>]</div>
+      <div class="brace">}</div>
+    </div>
+  </section>
+
+  <!-- 3. Pipeline -->
+  <section class="scene" id="scene-pipeline">
+    <div class="topbar"><span>Track 1 · Alert triage</span><span>2 · How a case is decided</span></div>
+    <h2 class="head">Four steps for every case</h2>
+    <div class="abs" style="left:96px; top:212px; width:1728px; font-size:22px" data-at="0.4">
+      <span class="muted" style="margin-right:14px">Case pack:</span>
+      <span class="pill mono" style="font-size:19px">cases</span><span class="pill mono" style="font-size:19px">alerts</span><span class="pill mono" style="font-size:19px">transactions</span><span class="pill mono" style="font-size:19px">customers</span><span class="pill mono" style="font-size:19px">evidence/*.md</span><span class="pill mono" style="font-size:19px">previous_reviews</span><span class="pill mono" style="font-size:19px">internal_list</span>
+    </div>
+    <div class="panel step lit" style="left:96px" data-on="s1" data-focus="s1,e1+0.3">
+      <div class="n">STEP 1</div><h3>Explain</h3><div class="file">explanations.ts</div>
+      <p>Each document type is matched to transactions on facts: party, amount in pence, account, reference and date.</p>
+      <p class="muted" style="font-size:21px">Invoices, statements, settlement letters, takings books, refunds, payroll…</p>
+    </div>
+    <div class="panel step lit" style="left:536px" data-on="s2" data-focus="s2,e2+0.3">
+      <div class="n">STEP 2</div><h3>Look for suspicion</h3><div class="file">signals.ts</div>
+      <p>Concrete signals only: a fraud report, a structuring note, a device shared with other customers, a dissolved payer, an invoice that contradicts its payment.</p>
+    </div>
+    <div class="panel step lit" style="left:976px" data-on="s3" data-focus="s3,e3+0.3">
+      <div class="n">STEP 3</div><h3>Assess each alert</h3><div class="file">decision.ts</div>
+      <p>An alert is covered only when what stays unexplained is below that rule's own threshold.</p>
+      <p class="muted" style="font-size:21px">TM02: unexplained inflow under £2,000 and every material onward payment explained.</p>
+    </div>
+    <div class="panel step lit" style="left:1416px" data-on="s4" data-focus="s4,e4+0.3">
+      <div class="n">STEP 4</div><h3>Combine</h3><div class="file">one case, one verdict</div>
+      <div class="ladder">
+        <div data-at="s4+1.0"><b class="c-esc">ESCALATE</b> on any suspicion</div>
+        <div data-at="s4+2.3"><b class="c-rfi">RFI</b> for a gap: one specific request</div>
+        <div data-at="s4+4.6"><b class="c-close">CLOSE</b> when every alert is covered</div>
+      </div>
+    </div>
+    <div class="abs panel" style="left:96px; top:784px; width:1728px; padding:20px 30px; font-size:23.5px; color:#cdd6e6" data-at="s4+3.4">
+      <span class="mono c-accent" style="font-size:20px; margin-right:14px">submission.ts</span>
+      validates the batch before writing: every case, every alert ID, a verdict-compatible reason code, and cited IDs that exist.
+    </div>
+  </section>
+
+  <!-- 4. Case -->
+  <section class="scene" id="scene-case">
+    <div class="topbar"><span>Track 1 · Alert triage</span><span>3 · Real development cases</span></div>
+    <h2 class="head">An invoice on file is not enough. It has to match.</h2>
+    <div class="abs panel case-main" data-at="0.3">
+      <div class="case-id">PX-CS118701 · alert PX-AL5797903 · Payments/FX</div>
+      <div class="case-title">TM06 Unexpected higher-risk country: a held payment awaiting release</div>
+      <table class="match">
+        <tr><th></th><th>Held payment PX-T717987710</th><th data-at="s1-0.2">Invoice INV-5129</th><th></th></tr>
+        <tr><td class="label">Payee</td><td>Oakhurst Dried Fruits Co, Iraq</td><td data-at="s1-0.2">Oakhurst Dried Fruits Co, Erbil, Iraq</td><td class="tick" data-at="s1+1.5" data-fx="pop">✓</td></tr>
+        <tr><td class="label">Amount</td><td class="mono">£33,173.83</td><td class="mono" data-at="s1-0.2">£33,173.83</td><td class="tick" data-at="s1+2.8" data-fx="pop">✓</td></tr>
+        <tr><td class="label">Account</td><td>account ending 7144</td><td data-at="s1-0.2">Pay to: account ending 7144</td><td class="tick" data-at="s1+4.5" data-fx="pop">✓</td></tr>
+        <tr><td class="label">Reference</td><td class="mono">INV 76621</td><td data-at="s1-0.2">Invoice <span class="mono">INV 76621</span></td><td class="tick" data-at="s1+5.2" data-fx="pop">✓</td></tr>
+        <tr><td class="label">Date</td><td>15 September 2026</td><td data-at="s1-0.2">Dated 13 September 2026</td><td class="tick" data-at="s1+5.7" data-fx="pop">✓</td></tr>
+      </table>
+      <div class="outcome" data-at="s1+6.3">
+        <span class="tag close">CLOSE</span> <span class="mono" style="font-size:22px; margin:0 10px">INVOICE_MATCHES</span> The held payment can be released.
+      </div>
+    </div>
+    <div class="abs panel variant" style="top:206px" data-at="s2">
+      <div class="case-id">PX-CS107109 · TM01</div>
+      <div class="fact">£756,614.55 paid to a supplier in Poland.<br><b>No invoice or contract on file.</b></div>
+      <div class="result" data-at="s2+2.0"><span class="tag rfi">RFI</span> <span class="mono" style="font-size:20px; margin-left:8px">RFI_PURPOSE_DOCUMENTS</span><br>
+        <span style="display:block; margin-top:10px">Ask for the invoice, purchase order or contract supporting that payment.</span></div>
+    </div>
+    <div class="abs panel variant" style="top:569px" data-at="s3">
+      <div class="case-id">PX-CS123153 · TM01</div>
+      <div class="fact">Paid <b class="mono">£212,288.40</b> quoting INV 18412.<br>The invoice says <b class="mono c-esc">£242,008.78</b>.</div>
+      <div class="result" data-at="s4+0.2"><span class="tag esc">ESCALATE</span> <span class="mono" style="font-size:20px; margin-left:8px">ESC_INVOICE_MISMATCH</span><br>
+        <span style="display:block; margin-top:10px">Refer to the MLRO without contacting the customer.</span></div>
+    </div>
+  </section>
+
+  <!-- 5. Decisions -->
+  <section class="scene" id="scene-decisions">
+    <div class="topbar"><span>Track 1 · Alert triage</span><span>4 · Architecture</span></div>
+    <h2 class="head">Four design decisions</h2>
+    <div class="panel decision lit" style="left:96px; top:206px" data-on="s1" data-focus="s1,e1+0.3">
+      <div class="n">1</div><h3>Check facts, not wording</h3>
+      <p>Every CLOSE path compares party, pence, account, reference and dates. A wrongful close costs 10 points; over-caution costs 2 or 3.</p>
+      <div class="proof">Our audit: shifting the amounts in cited documents by £37 removed 1,561 of 1,827 closes. The rest did not rely on amounts.</div>
+    </div>
+    <div class="panel decision lit" style="left:976px; top:206px" data-on="s2" data-focus="s2,e2+0.3">
+      <div class="n">2</div><h3>Deterministic decision logic</h3>
+      <p>Stable ordering and tie-breaks. No randomness, clock or file-order dependence.</p>
+      <div class="proof">Offline, five runs per institution reproduce the output byte for byte, at no model cost.</div>
+    </div>
+    <div class="panel decision lit" style="left:96px; top:560px" data-on="s3" data-focus="s3,e3+0.3">
+      <div class="n">3</div><h3>One engine, four institutions</h3>
+      <p>Shared code where the four policies agree. The differences are settings, not forks.</p>
+      <div class="proof">Payments/FX: own-name funding is normal, and £10,000 or more to anyone else needs a matched invoice or contract before release.</div>
+    </div>
+    <div class="panel decision lit" style="left:976px; top:560px" data-on="s4" data-focus="s4,e4+0.3">
+      <div class="n">4</div><h3>Fail safe, one case at a time</h3>
+      <p>A malformed record, missing document or thrown error escalates that case with its alert IDs.</p>
+      <div class="proof">Fault injection: each corrupted copy of the Bank folder still wrote all 1,000 lines, with at most one case changed.</div>
+    </div>
+  </section>
+
+  <!-- 6. Reader -->
+  <section class="scene" id="scene-reader">
+    <div class="topbar"><span>Track 1 · Alert triage</span><span>5 · Optional second pass</span></div>
+    <h2 class="head">A language model as an untrusted reader</h2>
+    <div class="flow">
+      <div class="panel box" data-at="0.3"><h4>Deterministic pass</h4><p>Every case gets its verdict from the parsers and rules first.</p></div>
+      <div class="arrow" data-at="s0+0.6">→</div>
+      <div class="panel box" data-at="s0+0.6"><h4>Only with a key</h4><p>The second pass runs when <span class="mono" style="font-size:18px">OPENROUTER_API_KEY</span> is set. Without it, nothing changes.</p></div>
+      <div class="arrow" data-at="s0+2.4">→</div>
+      <div class="panel box" data-at="s0+2.4"><h4>Unread documents</h4><p>The model sees only documents no parser used, on cases they could change.</p></div>
+      <div class="arrow" data-at="s1+0.4">→</div>
+      <div class="panel box lit" style="--p:1" data-at="s1+0.4" data-focus="s1+1.6,s1+4.2"><h4>Quote check</h4><p>A fact counts only if its quote appears word for word in the document.</p></div>
+      <div class="arrow" data-at="s1+4.2">→</div>
+      <div class="panel box lit" style="--p:1" data-at="s1+4.2" data-focus="s1+4.4,e1+0.4"><h4>Same rules decide</h4><p>Checked facts go through the same exact-match rules. The model never picks a verdict.</p></div>
+    </div>
+    <div class="abs panel closing" data-at="s2-0.1">
+      <div style="font-size:40px; font-weight:680">One set of findings produces the whole answer</div>
+      <div style="margin-top:26px">
+        <span class="field" data-at="s2+0.3">verdict</span><span class="field" data-at="s2+0.9">reason_code</span><span class="field" data-at="s2+1.3">reason</span><span class="field" data-at="s2+1.9">evidence</span>
+      </div>
+      <div style="margin-top:28px; font-size:27px; color:#cdd6e6" data-at="s2+3.4">
+        So every answer traces back to a document, a transaction or a list entry in the case file.
+      </div>
+    </div>
+  </section>
+
+  <div id="caption"><span></span></div>
+  <div id="progress"></div>
+</div>
+<div id="play">Click to play with narration</div>
+
+<script src="build/timeline.js"></script>
+<script>
+  const T = window.TIMELINE;
+  const stage = document.getElementById("stage");
+  const caption = document.querySelector("#caption span");
+  const progress = document.getElementById("progress");
+  const clamp = (x) => Math.max(0, Math.min(1, x));
+  const ease = (x) => 1 - Math.pow(1 - clamp(x), 3);
+
+  /** "1.5", "s2" (start of sentence 2), "e2" (its end), each with an optional offset such as "s2+0.4". */
+  function time(spec, scene) {
+    const m = /^([se])(\d+)([+-][\d.]+)?$/.exec(spec.trim());
+    if (!m) return parseFloat(spec);
+    const sentence = scene.sentences[+m[2]];
+    return (m[1] === "s" ? sentence.from : sentence.to) + (m[3] ? parseFloat(m[3]) : 0);
+  }
+
+  const scenes = T.scenes.map((scene) => {
+    const el = document.getElementById(`scene-${scene.id}`);
+    const items = [...el.querySelectorAll("[data-at], [data-on], [data-focus]")].map((node) => {
+      const d = node.dataset;
+      const focus = d.focus ? d.focus.split(",").map((part) => time(part, scene)) : undefined;
+      return { node, at: d.at ? time(d.at, scene) : undefined, on: d.on ? time(d.on, scene) : undefined, focus,
+        fx: d.fx ?? "up", type: "type" in d ? node.textContent : undefined, cps: +(d.cps ?? 40) };
+    });
+    return { ...scene, el, items };
+  });
+
+  let signature = [];
+  function style(node, property, value) {
+    signature.push(value);
+    if (property.startsWith("--")) node.style.setProperty(property, value); else node.style[property] = value;
+  }
+
+  /** Draw the frame at time t (seconds). Returns a string that is equal for identical frames. */
+  window.seek = function (t) {
+    signature = [];
+    let line = "";
+    scenes.forEach((scene, index) => {
+      const local = t - scene.start;
+      const last = index === scenes.length - 1;
+      if (local < 0 || (local >= scene.duration && !last)) { scene.el.style.display = "none"; return; }
+      scene.el.style.display = "block";
+      const fadeOut = last ? 1 : clamp((scene.duration - local) / 0.35);
+      style(scene.el, "opacity", Math.min(ease(local / 0.4), fadeOut).toFixed(3));
+      for (const item of scene.items) {
+        if (item.type !== undefined) {
+          const count = Math.max(0, Math.min(item.type.length, Math.floor((local - item.at) * item.cps)));
+          const typing = count > 0 && count < item.type.length;
+          const text = item.type.slice(0, count) + (typing ? "▌" : "");
+          signature.push(text);
+          if (item.node.textContent !== text) item.node.textContent = text;
+        } else if (item.at !== undefined) {
+          const p = ease((local - item.at) / 0.45);
+          style(item.node, "opacity", p.toFixed(3));
+          style(item.node, "transform", item.fx === "pop" ? `scale(${(0.4 + 0.6 * p).toFixed(3)})` : `translateY(${((1 - p) * 16).toFixed(2)}px)`);
+        }
+        if (item.on !== undefined) style(item.node, "--p", ease((local - item.on) / 0.45).toFixed(3));
+        if (item.focus) style(item.node, "--f", (ease((local - item.focus[0]) / 0.35) * (1 - ease((local - item.focus[1]) / 0.35))).toFixed(3));
+      }
+      const spoken = scene.sentences.find((sentence) => local >= sentence.from - 0.15 && local < sentence.to + 0.3);
+      if (spoken) line = spoken.text;
+    });
+    signature.push(line);
+    if (caption.textContent !== line) caption.textContent = line;
+    caption.style.visibility = line ? "visible" : "hidden";
+    const width = `${(clamp(t / T.duration) * 1920).toFixed(0)}px`;
+    signature.push(width);
+    progress.style.width = width;
+    return signature.join("|");
+  };
+
+  if (new URLSearchParams(location.search).has("render")) {
+    window.seek(0);
+  } else {
+    // Preview in a browser: scale to the window and follow the narration track.
+    const fit = () => { stage.style.transform = `scale(${Math.min(innerWidth / 1920, innerHeight / 1080)})`; };
+    addEventListener("resize", fit); fit();
+    const audio = new Audio("build/narration.wav");
+    const play = document.getElementById("play");
+    play.style.display = "flex";
+    window.seek(0);
+    play.addEventListener("click", () => {
+      play.style.display = "none";
+      audio.currentTime = 0; audio.play();
+      const tick = () => { window.seek(audio.currentTime); if (!audio.ended) requestAnimationFrame(tick); else play.style.display = "flex"; };
+      tick();
+    });
+  }
+</script>
+</body>
+</html>

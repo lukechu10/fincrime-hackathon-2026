@@ -79,10 +79,10 @@ Task: report three kinds of statement. For each, present is true only if the doc
 - refused_to_explain: when asked about a payment, the customer refused, avoided or was unable to explain it.`,
 };
 
-/** The chat messages for one document. */
+/** The chat messages for one document. The schema is also stated in the prompt for models without structured output. */
 export function messages(kind: TaskKind, doc: EvidenceDocument, customerName: string) {
   return [
-    { role: "system", content: PROMPTS[kind] },
+    { role: "system", content: `${PROMPTS[kind]}\nReply with one JSON object and nothing else. It must match this JSON schema:\n${JSON.stringify(SCHEMAS[kind].schema)}` },
     { role: "user", content: `Customer: ${customerName}\nDocument type: ${doc.metadata.type}\nDocument date: ${doc.metadata.dated}\n\n<document>\n${doc.markdown}\n</document>` },
   ];
 }

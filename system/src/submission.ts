@@ -56,7 +56,9 @@ export interface RunOptions {
 /** The fallback reader for this run, if the evaluator supplied a key. */
 function defaultReader(): DocumentReader | undefined {
   const apiKey = process.env.OPENROUTER_API_KEY?.trim();
-  return apiKey ? openRouterReader({ apiKey }) : undefined;
+  // OPENROUTER_MODEL overrides the pinned model, e.g. to try a free model during development.
+  const model = process.env.OPENROUTER_MODEL?.trim() || undefined;
+  return apiKey ? openRouterReader({ apiKey, model }) : undefined;
 }
 
 export async function runSubmission(input: string, output: string, options: RunOptions = {}): Promise<void> {

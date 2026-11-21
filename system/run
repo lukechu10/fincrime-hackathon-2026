@@ -2578,7 +2578,9 @@ Task: report three kinds of statement. For each, present is true only if the doc
 };
 function messages(kind, doc, customerName) {
   return [
-    { role: "system", content: PROMPTS[kind] },
+    { role: "system", content: `${PROMPTS[kind]}
+Reply with one JSON object and nothing else. It must match this JSON schema:
+${JSON.stringify(SCHEMAS[kind].schema)}` },
     { role: "user", content: `Customer: ${customerName}
 Document type: ${doc.metadata.type}
 Document date: ${doc.metadata.dated}
@@ -2595,9 +2597,16 @@ var MODEL = "anthropic/claude-haiku-5.5";
 var sleep = (ms) => new Promise((resolve3) => setTimeout(resolve3, ms));
 function parseReply(content) {
   if (typeof content !== "string") return void 0;
-  const text2 = content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  const text2 = content.replace(/<think>[\s\S]*?<\/think>/gi, "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   try {
     return JSON.parse(text2);
+  } catch {
+  }
+  const start = text2.indexOf("{");
+  const end = text2.lastIndexOf("}");
+  if (start < 0 || end <= start) return void 0;
+  try {
+    return JSON.parse(text2.slice(start, end + 1));
   } catch {
     return void 0;
   }
@@ -2619,8 +2628,8 @@ function openRouterReader(options) {
       // Ignored by models that do not support them; the answer is validated against the document either way.
       temperature: 0,
       seed: 0,
-      max_tokens: 1500,
-      provider: { order: ["anthropic"] },
+      max_tokens: 4e3,
+      ...model.startsWith("anthropic/") ? { provider: { order: ["anthropic"] } } : {},
       usage: { include: true }
     });
     for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -2632,7 +2641,10 @@ function openRouterReader(options) {
           signal: AbortSignal.timeout(timeoutMs),
           headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" }
         });
-        if (response.status === 429 || response.status >= 500) throw new Error(`HTTP ${response.status}`);
+        if (response.status === 429 || response.status >= 500) {
+          if (response.status === 429 && attempt < attempts) await sleep(1e4 * attempt);
+          throw new Error(`HTTP ${response.status}`);
+        }
         if (!response.ok) {
           failures++;
           warn(`model call for ${doc.metadata.doc_id} failed with HTTP ${response.status}`);
@@ -2700,7 +2712,8 @@ var inside = (base, path) => {
 };
 function defaultReader() {
   const apiKey = process.env.OPENROUTER_API_KEY?.trim();
-  return apiKey ? openRouterReader({ apiKey }) : void 0;
+  const model = process.env.OPENROUTER_MODEL?.trim() || void 0;
+  return apiKey ? openRouterReader({ apiKey, model }) : void 0;
 }
 async function runSubmission(input, output, options = {}) {
   const target = resolve2(output);

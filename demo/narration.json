@@ -1,0 +1,59 @@
+{
+  "voice": "Microsoft David Desktop",
+  "rate": 1,
+  "scenes": [
+    {
+      "id": "title",
+      "sentences": [
+        { "text": "This is our Track 1 system." },
+        { "text": "It plays the analyst: it reads each monitoring case and recommends close, request information, or escalate, citing the evidence it used." }
+      ]
+    },
+    {
+      "id": "run",
+      "sentences": [
+        { "text": "One command takes an institution folder and writes one verdict per case." },
+        { "text": "A thousand cases take about two seconds." },
+        { "text": "Each line has a verdict, a reason code, a written reason and the evidence it cites.", "say": "Each line has a verdict, a reason code, a written reason, and the evidence it cites." }
+      ]
+    },
+    {
+      "id": "pipeline",
+      "sentences": [
+        { "text": "Every case takes four steps." },
+        { "text": "Explain the transactions from documents and history." },
+        { "text": "Look for concrete signs of suspicion." },
+        { "text": "Test each alert against its own rule: it is covered only when what stays unexplained is below that rule's threshold." },
+        { "text": "Then combine: suspicion escalates, a gap becomes one specific request, and otherwise the case closes." }
+      ]
+    },
+    {
+      "id": "case",
+      "sentences": [
+        { "text": "Here is a held payment of £33,173.83 to Iraq.", "say": "Here is a held payment of thirty-three thousand pounds to Iraq." },
+        { "text": "The invoice names the same supplier, the same amount to the penny, and the same account and reference, so the payment can be released." },
+        { "text": "In a second case no invoice is on file, so the system asks for it." },
+        { "text": "In a third, the invoice shows a different amount." },
+        { "text": "That is a contradiction, so it goes to the MLRO.", "say": "That is a contradiction, so it goes to the M L R O." }
+      ]
+    },
+    {
+      "id": "decisions",
+      "sentences": [
+        { "text": "Four decisions shaped the design." },
+        { "text": "One: check facts, not wording. A wrongful close costs the most, so a close needs proof." },
+        { "text": "Two: the decision logic is deterministic, and offline repeat runs are byte-identical.", "say": "Two: the decision logic is deterministic, and offline repeat runs are byte identical." },
+        { "text": "Three: one engine serves all four institutions; only policy settings differ." },
+        { "text": "Four: fail safe. A case that cannot be read is escalated alone, and the run continues." }
+      ]
+    },
+    {
+      "id": "reader",
+      "sentences": [
+        { "text": "If a key is supplied, a language model reads only documents no parser recognised." },
+        { "text": "It is an untrusted reader: each fact needs a word-for-word quote, and the same rules still decide.", "say": "It is an untrusted reader: each fact needs a word for word quote, and the same rules still decide." },
+        { "text": "Verdict, reason and evidence come from the same findings, so every answer traces to its source.", "say": "Verdict, reason, and evidence come from the same findings, so every answer traces to its source." }
+      ]
+    }
+  ]
+}
