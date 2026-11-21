@@ -1,4 +1,5 @@
 import type { BankAlert, BankTransaction, InstitutionCasePack } from "./bank-cases.js";
+import { incidentalEmoneyMovements } from "./emoney-rapid-movement.js";
 import { describe, explainTransactions, type CloseCode, type Explanation, type ExplanationIndex } from "./explanations.js";
 import { assessListMatch } from "./list-assessment.js";
 import { NO_FINDINGS, type Findings } from "./llm/facts.js";
@@ -26,7 +27,7 @@ export interface CaseDecision {
 
 interface Suspicion { readonly code: Code<"ESCALATE">; readonly fact: string; readonly evidence: readonly string[]; readonly rank: number }
 interface Gap { readonly code: Code<"RFI">; readonly fact: string; readonly request: string; readonly evidence: readonly string[]; readonly rank: number }
-interface Cover { readonly alert: BankAlert; readonly code: CloseCode; readonly fact?: string; readonly evidence: readonly string[];
+interface Cover { readonly alert: BankAlert; readonly code: CloseCode; readonly fact?: string; readonly residualFact?: string; readonly evidence: readonly string[];
   readonly explanations: readonly { tx: BankTransaction; explanation: Explanation }[] }
 
 const gbp = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" });
@@ -180,9 +181,16 @@ function gapFor(pack: InstitutionCasePack, alert: BankAlert, open: readonly Bank
           request: `Ask ${name} for the contract or payment schedule that sets the amount and timing of each flagged payment` }
         : { code: "RFI_BUSINESS_RECORDS", rank, evidence: alert.transaction_ids, fact: `${alert.rule_id} flagged repeated cash amounts just under the threshold, including ${what}, with no business records on file`,
           request: `Ask ${name} for the takings or collection records behind each flagged cash payment in the review window` };
-    case "TM08":
+    case "TM08": {
+      if (pack.caseRecord.institution === "investment" && open.length && open.every((tx) => tx.direction === "in")) {
+        const deposits = open.map(describe).join("; ");
+        return { code: "RFI_SOURCE_OF_FUNDS", rank, evidence: open.map((tx) => tx.transaction_id),
+          fact: `TM08 flagged funding from an account not in ${name}'s name: ${deposits}`,
+          request: `Ask ${name} for proof of the source of the flagged deposit${open.length === 1 ? "" : "s"}, such as a donor letter, completion statement or sending-account statement that links the money and the sender to ${name}` };
+      }
       return { code: "RFI_COUNTERPARTY_DETAILS", rank, evidence, fact: `${alert.rule_id} flagged ${what} from an account not in ${name}'s name`,
         request: `Ask ${name} who ${subject?.counterparty_name ? label(subject.counterparty_name) : "the other party"} is, their relationship to the customer, and the document behind the transfer` };
+    }
     case "TM10": {
       const sold = largest(open.filter((tx) => tx.channel === "fund_redemption")) ?? subject;
       const bought = largest(open.filter((tx) => tx.channel === "fund_subscription"));
@@ -219,6 +227,8 @@ export function decideCase(pack: InstitutionCasePack, findings: Findings = NO_FI
   if (heldPayment) flagged.set(heldPayment.transaction_id, heldPayment);
   const suspicions: Suspicion[] = [];
   const gaps: Gap[] = [];
+  const investmentFundingRequested = new Set<string>();
+  const investmentProfileGaps: { alert: BankAlert; open: BankTransaction[] }[] = [];
   const covers: Cover[] = [];
   const rankOf = (code: Code<"ESCALATE">) => SUSPICION_ORDER.indexOf(code) + 1;
 
@@ -265,6 +275,11 @@ export function decideCase(pack: InstitutionCasePack, findings: Findings = NO_FI
     if (alert.rule_id === "TM02") {
       const suspicion = rapidMovementSuspicion(pack, open);
       if (suspicion) { suspicions.push({ ...suspicion, rank: rankOf(suspicion.code) }); continue; }
+      const incidental = incidentalEmoneyMovements(pack, relevant, open, explanations, isCrypto);
+      if (incidental) {
+        covers.push({ alert, code: closeCode(explanations), residualFact: incidental.fact, evidence: incidental.evidence, explanations });
+        continue;
+      }
     }
     if (alert.rule_id === "TM06") {
       // Several unrelated private individuals sending or receiving money through a higher-risk country is a
@@ -290,7 +305,23 @@ export function decideCase(pack: InstitutionCasePack, findings: Findings = NO_FI
         continue;
       }
     }
-    gaps.push(gapFor(pack, alert, open, index));
+    // A source-of-funds request for a TM08 deposit also addresses the TM01 gap on that same deposit.
+    if (caseRecord.institution === "investment" && alert.rule_id === "TM01" && open.length
+      && open.every((tx) => tx.direction === "in" && !index.unexplainedOnward.has(tx.transaction_id))) {
+      investmentProfileGaps.push({ alert, open });
+      continue;
+    }
+    const gap = gapFor(pack, alert, open, index);
+    if (caseRecord.institution === "investment" && alert.rule_id === "TM08" && gap.code === "RFI_SOURCE_OF_FUNDS") {
+      for (const id of gap.evidence) investmentFundingRequested.add(id);
+    }
+    gaps.push(gap);
+  }
+  for (const { alert, open } of investmentProfileGaps) {
+    const remaining = open.filter((tx) => !investmentFundingRequested.has(tx.transaction_id));
+    if (remaining.length && (remaining.length === open.length || !covered(pack, alert, open, remaining))) {
+      gaps.push(gapFor(pack, alert, remaining, index));
+    }
   }
 
   let heldSupport: { tx: BankTransaction; explanation: Explanation } | undefined;
@@ -360,8 +391,10 @@ export function decideCase(pack: InstitutionCasePack, findings: Findings = NO_FI
       .sort((a, b) => b.tx.amount_gbp - a.tx.amount_gbp).map((item) => item.explanation.fact));
     const lead = special?.fact;
     const facts = distinct([...(lead ? [lead] : []), ...(heldSupport ? [heldSupport.explanation.fact] : []), ...documented]).slice(0, 2);
+    const residual = covers.find((cover) => cover.residualFact)?.residualFact;
     reason = [...(facts.length ? facts : [`The flagged activity fits ${name}'s declared profile`]),
-      `Together the evidence explains all the activity behind ${rules}${heldPayment ? ", so the held payment can be released" : ""}`];
+      ...(residual ? [residual] : []),
+      `Together the evidence explains ${residual ? "" : "all "}the activity behind ${rules}${heldPayment ? ", so the held payment can be released" : ""}`];
     // Cite every explained transaction that coverage relied on, except routine own-name funding.
     evidence = distinct([...covers.flatMap((cover) => cover.evidence),
       ...items.filter((item) => !item.explanation.ownFunds)

@@ -464,122 +464,6 @@ function loadInstitutionCases(directory) {
   return loadCases(directory, false);
 }
 
-// src/reconciliation.ts
-var normalize = (s) => s.trim().replace(/\s+/g, " ").toLowerCase();
-function minor(amount) {
-  const parts = /^(\d+)(?:\.(\d{1,2}))?$/.exec(String(amount));
-  const minor2 = parts && Number(parts[1] + (parts[2] ?? "").padEnd(2, "0"));
-  return typeof minor2 === "number" && Number.isSafeInteger(minor2) ? minor2 : void 0;
-}
-
-// src/documented-credits.ts
-function one(items) {
-  return items.length === 1 ? items[0] : void 0;
-}
-function field(markdown, label5) {
-  return one([...markdown.matchAll(new RegExp(`^\\*\\*${label5}:\\*\\*[ \\t]*(.+)$`, "gim"))].map((match) => match[1].trim()));
-}
-function refMatches(text2, kind) {
-  const matches = [...text2.matchAll(new RegExp(`\\b${kind}[ \\t]+(?=[A-Z0-9-]*\\d)[A-Z0-9]+(?:-[A-Z0-9]+)*\\b`, "gi"))];
-  return one([...new Set(matches.map((m) => normalize(m[0])))]);
-}
-function oneAmount(text2) {
-  const amounts = [...text2.matchAll(/£[ \t]*[\d,]+(?:\.\d+)?/g)];
-  const amount = one(amounts);
-  return amount && parseGbp(amount[0])?.minorUnits;
-}
-function terms(doc, customerName) {
-  const { markdown } = doc;
-  if (doc.metadata.type === "insurer_letter") {
-    const issuer = /^# Claim settlement letter from (.+)$/im.exec(markdown)?.[1]?.trim();
-    const salutation = /^Dear[ \t]+(.+?),[ \t]*$/im.exec(markdown)?.[1];
-    const recipient = String.raw`((?:(?!\bto\b)[^\n.,*])+?)`;
-    const payees = [...new Set([
-      new RegExp(String.raw`\bto[ \t]+${recipient}[ \t]+(?:via|by)[ \t]+bank transfer\b`, "gi"),
-      new RegExp(String.raw`\bbank transfer[ \t]+(?:directly[ \t]+)?to[ \t]+${recipient}[.,]`, "gi"),
-      new RegExp(String.raw`\b(?:issued|paid|transferred|remitted)(?:[ \t]+directly)?[ \t]+to[ \t]+${recipient}(?:[ \t]+(?:by|via)\b|[.,])`, "gi"),
-      new RegExp(String.raw`\bpayment of \**£[\d,.]+\**[ \t]+to[ \t]+${recipient}(?:[ \t]+(?:by|via)\b|[.,])`, "gi")
-    ].flatMap((pattern) => [...markdown.matchAll(pattern)].map((match) => normalize(match[1]))).filter((name) => !/^(?:the|a|an|our)\b/.test(name)))];
-    const payeesOk = payees.every((payee) => /^(?:you|your(?: nominated)? (?:bank )?account)$/.test(payee) || payee === normalize(customerName));
-    const genericSalutation = !salutation || /^(?:sir|madam|sir\/madam|customer|client|policyholder)$/i.test(salutation.trim());
-    const addressed = salutation ? normalize(salutation) === normalize(customerName) : false;
-    const named = payees.some((payee) => payee === normalize(customerName));
-    const reference = refMatches(markdown, "claim");
-    const amount = oneAmount(markdown);
-    const accepted = /\b(?:accepted|approved)\b/i.test(markdown);
-    const disputed = /\b(?:not (?:yet )?(?:been )?(?:accepted|approved)|declined|rejected|subject to approval|pending|provisional|partial|cannot confirm|can['’]t confirm|unable to confirm|will not pay|under review|withheld|on hold)\b/i.test(markdown);
-    if (issuer && reference && amount && accepted && !disputed && payeesOk && (addressed || named || genericSalutation)) {
-      return { kind: "insurance_payout", party: issuer, amount, reference };
-    }
-  }
-  if (doc.metadata.type === "venue_email") {
-    const issuer = /^# Email from (.+)$/im.exec(markdown)?.[1]?.trim();
-    const reference = refMatches(markdown, "booking");
-    const amount = oneAmount(markdown);
-    if (issuer && reference && amount && /\bcancel/i.test(markdown) && /\brefund\b/i.test(markdown) && !/\b(?:no refund|not refunded|non.refundable|not refunding|unable to refund|partial refund|refund (?:is )?(?:declined|denied|not due|not issued)|will not (?:be )?refund|forfeited|retained)\b/i.test(markdown)) {
-      return { kind: "refund", party: issuer, amount, reference };
-    }
-  }
-  if (doc.metadata.type === "credit_note") {
-    const issuer = /^# Credit note from (.+)$/im.exec(markdown)?.[1]?.trim();
-    const supplier = field(markdown, "Supplier");
-    const customer = field(markdown, "Customer");
-    const cause = field(markdown, "Credit for");
-    const refund = field(markdown, "Refund");
-    const reference = cause && refMatches(cause, "booking");
-    const amount = refund && parseGbp(refund)?.minorUnits;
-    if (issuer && supplier && (normalize(supplier) === normalize(issuer) || normalize(supplier).startsWith(`${normalize(issuer)}, `)) && customer && normalize(customer) === normalize(customerName) && cause && /\bcancell?ed\b/i.test(cause) && !/\b(?:not|never)\s+cancell?ed\b/i.test(cause) && reference && amount) {
-      return { kind: "refund", party: issuer, amount, reference };
-    }
-  }
-}
-function mentions(text2, identifier) {
-  const literal = normalize(identifier).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(?<![a-z0-9-])${literal}(?![a-z0-9-])`).test(normalize(text2));
-}
-function validDate(day) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return false;
-  const date = /* @__PURE__ */ new Date(`${day}T00:00:00Z`);
-  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === day;
-}
-var txReference = (tx) => typeof tx.reference === "string" ? normalize(tx.reference) : "";
-var namesParty = (tx, party) => !!tx.counterparty_name && normalize(tx.counterparty_name) === normalize(party);
-function originalPayment(credit, payment, dated2, history) {
-  return one(history.filter((tx) => tx.direction === "out" && tx.customer_id === payment.customer_id && Date.parse(tx.booked_at) < Date.parse(payment.booked_at) && tx.booked_at.slice(0, 10) <= dated2 && txReference(tx) === credit.reference && minor(tx.amount_gbp) === credit.amount && namesParty(tx, credit.party) && tx.counterparty_country === payment.counterparty_country));
-}
-function documentedCredits(pack) {
-  const candidates = pack.documents.flatMap((doc) => {
-    const credit = doc.metadata.customer_id === pack.customer.customer_id ? terms(doc, pack.customer.name) : void 0;
-    return credit ? [{ doc, credit }] : [];
-  });
-  const byDocument = new Map(candidates.map(({ doc, credit }) => [doc, credit]));
-  const history = [...pack.priorTransactions, ...pack.windowTransactions].filter((tx) => tx.transaction_id !== pack.heldPayment?.transaction_id);
-  const matches = [];
-  for (const { doc, credit } of candidates) {
-    if (!validDate(doc.metadata.dated)) continue;
-    const unresolved = pack.documents.some((other) => {
-      if (other === doc || other.metadata.customer_id !== pack.customer.customer_id) return false;
-      if (mentions(other.markdown, doc.metadata.doc_id) && /\b(?:forged|altered|fabricat\w*|unverified|could not verify|suspicious)\b/i.test(other.markdown)) return true;
-      if (!mentions(other.markdown, credit.reference)) return false;
-      const terms2 = byDocument.get(other);
-      return !terms2 || terms2.kind !== credit.kind || terms2.reference !== credit.reference || terms2.amount !== credit.amount || normalize(terms2.party) !== normalize(credit.party);
-    });
-    if (unresolved) continue;
-    const reference = credit.kind === "refund" ? `refund ${credit.reference}` : credit.reference;
-    const payment = one(history.filter((tx) => tx.direction === "in" && tx.customer_id === pack.customer.customer_id && txReference(tx) === reference && minor(tx.amount_gbp) === credit.amount && namesParty(tx, credit.party)));
-    if (!payment) continue;
-    const day = payment.booked_at.slice(0, 10);
-    const { from, to } = pack.caseRecord.review_window;
-    if (day < from || day > to || doc.metadata.dated > day) continue;
-    const original = credit.kind === "refund" ? originalPayment(credit, payment, doc.metadata.dated, history) : void 0;
-    if (credit.kind === "refund" && !original) continue;
-    matches.push({ kind: credit.kind, reference: credit.reference.toUpperCase(), documentId: doc.metadata.doc_id, payment, original });
-  }
-  const counts = /* @__PURE__ */ new Map();
-  for (const { payment } of matches) counts.set(payment.transaction_id, (counts.get(payment.transaction_id) ?? 0) + 1);
-  return new Map(matches.filter(({ payment }) => counts.get(payment.transaction_id) === 1).map((match) => [match.payment.transaction_id, match]));
-}
-
 // src/text.ts
 var MONTHS = [
   "january",
@@ -659,7 +543,7 @@ function fields(markdown, label5) {
   const escaped = label5.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return [...markdown.matchAll(new RegExp(`^[ \\t]*(?:[*-][ \\t]+)?\\*\\*${escaped}:\\*\\*[ \\t]*(.+?)[ \\t]*$`, "gim"))].map((match) => match[1].trim());
 }
-function field2(markdown, label5) {
+function field(markdown, label5) {
   const values = [...new Set(fields(markdown, label5))];
   return values.length === 1 ? values[0] : void 0;
 }
@@ -719,6 +603,195 @@ var HIGHER_RISK_COUNTRIES = /* @__PURE__ */ new Set([
   "yemen"
 ]);
 
+// src/emoney-rapid-movement.ts
+var dayMs = 864e5;
+var minimumIncoming = 2e5;
+var minimumOnward = minimumIncoming * 4 / 5;
+var amountOf = (tx) => pence(tx.amount_gbp) ?? 0;
+var sum = (txs) => txs.reduce((total, tx) => total + amountOf(tx), 0);
+var atLeast80Percent = (part, whole) => 5 * part >= 4 * whole;
+var time = (tx) => Date.parse(tx.booked_at);
+var precedesWithin48h = (a, b) => time(a) <= time(b) && time(b) - time(a) <= 2 * dayMs;
+var domestic = (tx) => typeof tx.counterparty_country === "string" && sameName(tx.counterparty_country, "United Kingdom");
+function everydayChannel(tx) {
+  if (tx.direction !== "out" || !domestic(tx)) return false;
+  return tx.channel === "cash_withdrawal" || tx.channel === "wallet_transfer" && !!tx.counterparty_name && !looksLikeOrganization(tx.counterparty_name);
+}
+function priorComparable(history, channel, first, amount) {
+  const sorted = history.filter((tx) => everydayChannel(tx) && tx.channel === channel && time(tx) < first).sort((a, b) => time(b) - time(a) || a.transaction_id.localeCompare(b.transaction_id));
+  let start = 0;
+  let total = 0;
+  for (const [end, tx] of sorted.entries()) {
+    total += amountOf(tx);
+    while (time(sorted[start]) - time(tx) >= 10 * dayMs) total -= amountOf(sorted[start++]);
+    if (total >= amount) return sorted.slice(start, end + 1);
+  }
+  return void 0;
+}
+function incidentalEmoneyMovements(pack, txs, open, explained, isCrypto2) {
+  if (pack.caseRecord.institution !== "emoney") return void 0;
+  const wallet = txs[0]?.account_id;
+  if (typeof wallet !== "string" || !wallet || txs.some((tx) => tx.account_id !== wallet)) return void 0;
+  const residualOut = open.filter((tx) => tx.direction === "out");
+  const residualIn = open.filter((tx) => tx.direction === "in");
+  if (!residualOut.length || !residualOut.every((tx) => everydayChannel(tx) && !isCrypto2(tx)) || sum(residualIn) >= minimumIncoming) return void 0;
+  if (residualIn.some((tx) => !sameName(tx.counterparty_name, pack.customer.name) || !domestic(tx) || tx.channel !== "faster_payment")) return void 0;
+  const payouts = explained.filter(({ tx }) => tx.direction === "out");
+  const credits2 = explained.filter(({ tx }) => tx.direction === "in");
+  if (payouts.length !== 1 || !credits2.length) return void 0;
+  const [{ tx: payout, explanation }] = payouts;
+  const coreOut = amountOf(payout);
+  const residualPaid = sum(residualOut);
+  if (!explanation.docs.length || coreOut < minimumOnward || !atLeast80Percent(coreOut, coreOut + residualPaid) || residualPaid >= minimumOnward) return void 0;
+  const docTypes = new Map(pack.documents.map(({ metadata }) => [metadata.doc_id, metadata.type]));
+  const onlyCredit = credits2.length === 1 ? credits2[0] : void 0;
+  let principalCredits;
+  let contribution;
+  if (explanation.code === "COLLECTION_DOCUMENTED" && credits2.every(({ tx, explanation: credit }) => time(tx) <= time(payout) && credit.code === "COLLECTION_DOCUMENTED" && credit.docs.some((id) => explanation.docs.includes(id) && docTypes.get(id) === "booking_confirmation"))) {
+    principalCredits = credits2.map(({ tx }) => tx);
+  } else if (onlyCredit && explanation.code === "OWN_ACCOUNT" && onlyCredit.explanation.code === "OWN_ACCOUNT" && onlyCredit.explanation.docs.length && amountOf(onlyCredit.tx) === coreOut && precedesWithin48h(onlyCredit.tx, payout)) {
+    principalCredits = [onlyCredit.tx];
+  } else if (onlyCredit && explanation.docs.some((id) => docTypes.get(id) === "holding_deposit_receipt") && onlyCredit.explanation.docs.some((id) => docTypes.get(id) === "deposit_return_letter") && precedesWithin48h(onlyCredit.tx, payout)) {
+    const difference = coreOut - amountOf(onlyCredit.tx);
+    const matches = residualIn.filter((tx) => amountOf(tx) === difference && precedesWithin48h(tx, payout));
+    if (difference < 0 || difference > 0 && matches.length !== 1) return void 0;
+    contribution = difference > 0 ? matches[0] : void 0;
+    principalCredits = contribution ? [onlyCredit.tx, contribution] : [onlyCredit.tx];
+  } else return void 0;
+  const coreIn = sum(principalCredits);
+  if (coreIn < minimumIncoming || !atLeast80Percent(coreIn, sum(txs.filter((tx) => tx.direction === "in"))) || !atLeast80Percent(coreOut, coreIn)) return void 0;
+  const first = Math.min(...txs.map(time));
+  const history = [...pack.priorTransactions, ...pack.windowTransactions].filter((tx) => tx.account_id === wallet && !isCrypto2(tx));
+  const comparisons = [];
+  for (const channel of new Set(residualOut.map((tx) => tx.channel))) {
+    const prior = priorComparable(history, channel, first, sum(residualOut.filter((tx) => tx.channel === channel)));
+    if (!prior) return void 0;
+    comparisons.push(...prior);
+  }
+  const gbp3 = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" });
+  const topUp = contribution ? ` (including a ${gbp3.format(amountOf(contribution) / 100)} top-up in the customer's name)` : "";
+  return {
+    fact: `TM02 centres on ${gbp3.format(coreIn / 100)} received${topUp} and the documented ${gbp3.format(coreOut / 100)} payout; the other ${gbp3.format(residualPaid / 100)} paid out fits prior activity on the same channels and is too small to trigger TM02 separately`,
+    evidence: [...residualOut, ...comparisons, ...contribution ? [contribution] : []].map((tx) => tx.transaction_id)
+  };
+}
+
+// src/reconciliation.ts
+var normalize = (s) => s.trim().replace(/\s+/g, " ").toLowerCase();
+function minor(amount) {
+  const parts = /^(\d+)(?:\.(\d{1,2}))?$/.exec(String(amount));
+  const minor2 = parts && Number(parts[1] + (parts[2] ?? "").padEnd(2, "0"));
+  return typeof minor2 === "number" && Number.isSafeInteger(minor2) ? minor2 : void 0;
+}
+
+// src/documented-credits.ts
+function one(items) {
+  return items.length === 1 ? items[0] : void 0;
+}
+function field2(markdown, label5) {
+  return one([...markdown.matchAll(new RegExp(`^\\*\\*${label5}:\\*\\*[ \\t]*(.+)$`, "gim"))].map((match) => match[1].trim()));
+}
+function refMatches(text2, kind) {
+  const matches = [...text2.matchAll(new RegExp(`\\b${kind}[ \\t]+(?=[A-Z0-9-]*\\d)[A-Z0-9]+(?:-[A-Z0-9]+)*\\b`, "gi"))];
+  return one([...new Set(matches.map((m) => normalize(m[0])))]);
+}
+function oneAmount(text2) {
+  const amounts = [...text2.matchAll(/£[ \t]*[\d,]+(?:\.\d+)?/g)];
+  const amount = one(amounts);
+  return amount && parseGbp(amount[0])?.minorUnits;
+}
+function terms(doc, customerName) {
+  const { markdown } = doc;
+  if (doc.metadata.type === "insurer_letter") {
+    const issuer = /^# Claim settlement letter from (.+)$/im.exec(markdown)?.[1]?.trim();
+    const salutation = /^Dear[ \t]+(.+?),[ \t]*$/im.exec(markdown)?.[1];
+    const recipient = String.raw`((?:(?!\bto\b)[^\n.,*])+?)`;
+    const payees = [...new Set([
+      new RegExp(String.raw`\bto[ \t]+${recipient}[ \t]+(?:via|by)[ \t]+bank transfer\b`, "gi"),
+      new RegExp(String.raw`\bbank transfer[ \t]+(?:directly[ \t]+)?to[ \t]+${recipient}[.,]`, "gi"),
+      new RegExp(String.raw`\b(?:issued|paid|transferred|remitted)(?:[ \t]+directly)?[ \t]+to[ \t]+${recipient}(?:[ \t]+(?:by|via)\b|[.,])`, "gi"),
+      new RegExp(String.raw`\bpayment of \**£[\d,.]+\**[ \t]+to[ \t]+${recipient}(?:[ \t]+(?:by|via)\b|[.,])`, "gi")
+    ].flatMap((pattern) => [...markdown.matchAll(pattern)].map((match) => normalize(match[1]))).filter((name) => !/^(?:the|a|an|our)\b/.test(name)))];
+    const payeesOk = payees.every((payee) => /^(?:you|your(?: nominated)? (?:bank )?account)$/.test(payee) || payee === normalize(customerName));
+    const genericSalutation = !salutation || /^(?:sir|madam|sir\/madam|customer|client|policyholder)$/i.test(salutation.trim());
+    const addressed = salutation ? normalize(salutation) === normalize(customerName) : false;
+    const named = payees.some((payee) => payee === normalize(customerName));
+    const reference = refMatches(markdown, "claim");
+    const amount = oneAmount(markdown);
+    const accepted = /\b(?:accepted|approved)\b/i.test(markdown);
+    const disputed = /\b(?:not (?:yet )?(?:been )?(?:accepted|approved)|declined|rejected|subject to approval|pending|provisional|partial|cannot confirm|can['’]t confirm|unable to confirm|will not pay|under review|withheld|on hold)\b/i.test(markdown);
+    if (issuer && reference && amount && accepted && !disputed && payeesOk && (addressed || named || genericSalutation)) {
+      return { kind: "insurance_payout", party: issuer, amount, reference };
+    }
+  }
+  if (doc.metadata.type === "venue_email") {
+    const issuer = /^# Email from (.+)$/im.exec(markdown)?.[1]?.trim();
+    const reference = refMatches(markdown, "booking");
+    const amount = oneAmount(markdown);
+    if (issuer && reference && amount && /\bcancel/i.test(markdown) && /\brefund\b/i.test(markdown) && !/\b(?:no refund|not refunded|non.refundable|not refunding|unable to refund|partial refund|refund (?:is )?(?:declined|denied|not due|not issued)|will not (?:be )?refund|forfeited|retained)\b/i.test(markdown)) {
+      return { kind: "refund", party: issuer, amount, reference };
+    }
+  }
+  if (doc.metadata.type === "credit_note") {
+    const issuer = /^# Credit note from (.+)$/im.exec(markdown)?.[1]?.trim();
+    const supplier = field2(markdown, "Supplier");
+    const customer = field2(markdown, "Customer");
+    const cause = field2(markdown, "Credit for");
+    const refund = field2(markdown, "Refund");
+    const reference = cause && refMatches(cause, "booking");
+    const amount = refund && parseGbp(refund)?.minorUnits;
+    if (issuer && supplier && (normalize(supplier) === normalize(issuer) || normalize(supplier).startsWith(`${normalize(issuer)}, `)) && customer && normalize(customer) === normalize(customerName) && cause && /\bcancell?ed\b/i.test(cause) && !/\b(?:not|never)\s+cancell?ed\b/i.test(cause) && reference && amount) {
+      return { kind: "refund", party: issuer, amount, reference };
+    }
+  }
+}
+function mentions(text2, identifier) {
+  const literal = normalize(identifier).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![a-z0-9-])${literal}(?![a-z0-9-])`).test(normalize(text2));
+}
+function validDate(day) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return false;
+  const date = /* @__PURE__ */ new Date(`${day}T00:00:00Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === day;
+}
+var txReference = (tx) => typeof tx.reference === "string" ? normalize(tx.reference) : "";
+var namesParty = (tx, party) => !!tx.counterparty_name && normalize(tx.counterparty_name) === normalize(party);
+function originalPayment(credit, payment, dated2, history) {
+  return one(history.filter((tx) => tx.direction === "out" && tx.customer_id === payment.customer_id && Date.parse(tx.booked_at) < Date.parse(payment.booked_at) && tx.booked_at.slice(0, 10) <= dated2 && txReference(tx) === credit.reference && minor(tx.amount_gbp) === credit.amount && namesParty(tx, credit.party) && tx.counterparty_country === payment.counterparty_country));
+}
+function documentedCredits(pack) {
+  const candidates = pack.documents.flatMap((doc) => {
+    const credit = doc.metadata.customer_id === pack.customer.customer_id ? terms(doc, pack.customer.name) : void 0;
+    return credit ? [{ doc, credit }] : [];
+  });
+  const byDocument = new Map(candidates.map(({ doc, credit }) => [doc, credit]));
+  const history = [...pack.priorTransactions, ...pack.windowTransactions].filter((tx) => tx.transaction_id !== pack.heldPayment?.transaction_id);
+  const matches = [];
+  for (const { doc, credit } of candidates) {
+    if (!validDate(doc.metadata.dated)) continue;
+    const unresolved = pack.documents.some((other) => {
+      if (other === doc || other.metadata.customer_id !== pack.customer.customer_id) return false;
+      if (mentions(other.markdown, doc.metadata.doc_id) && /\b(?:forged|altered|fabricat\w*|unverified|could not verify|suspicious)\b/i.test(other.markdown)) return true;
+      if (!mentions(other.markdown, credit.reference)) return false;
+      const terms2 = byDocument.get(other);
+      return !terms2 || terms2.kind !== credit.kind || terms2.reference !== credit.reference || terms2.amount !== credit.amount || normalize(terms2.party) !== normalize(credit.party);
+    });
+    if (unresolved) continue;
+    const reference = credit.kind === "refund" ? `refund ${credit.reference}` : credit.reference;
+    const payment = one(history.filter((tx) => tx.direction === "in" && tx.customer_id === pack.customer.customer_id && txReference(tx) === reference && minor(tx.amount_gbp) === credit.amount && namesParty(tx, credit.party)));
+    if (!payment) continue;
+    const day = payment.booked_at.slice(0, 10);
+    const { from, to } = pack.caseRecord.review_window;
+    if (day < from || day > to || doc.metadata.dated > day) continue;
+    const original = credit.kind === "refund" ? originalPayment(credit, payment, doc.metadata.dated, history) : void 0;
+    if (credit.kind === "refund" && !original) continue;
+    matches.push({ kind: credit.kind, reference: credit.reference.toUpperCase(), documentId: doc.metadata.doc_id, payment, original });
+  }
+  const counts = /* @__PURE__ */ new Map();
+  for (const { payment } of matches) counts.set(payment.transaction_id, (counts.get(payment.transaction_id) ?? 0) + 1);
+  return new Map(matches.filter(({ payment }) => counts.get(payment.transaction_id) === 1).map((match) => [match.payment.transaction_id, match]));
+}
+
 // src/explanations.ts
 var gbp = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" });
 var label = (s) => s.replace(/\s+/g, " ").trim();
@@ -747,14 +820,14 @@ function ownAccount(ctx, add) {
     if (!tx.counterparty_account || tx.direction === void 0) continue;
     for (const doc of ofType(ctx, "bank_statement")) {
       const md = doc.markdown;
-      const holder = field2(md, "Account holder");
-      const holders = (field2(md, "Account holders") ?? "").split(/\s*(?:,|\band\b)\s*/).filter(Boolean);
-      const accountName = field2(md, "Account name");
+      const holder = field(md, "Account holder");
+      const holders = (field(md, "Account holders") ?? "").split(/\s*(?:,|\band\b)\s*/).filter(Boolean);
+      const accountName = field(md, "Account name");
       const isHolder = sameName(holder, ctx.name) || holders.some((h) => sameName(h, ctx.name));
       const movements = [...md.matchAll(/^(\d{1,2} [A-Za-z]+ \d{4}):\s+(.+)$/gm)].map((m) => ({ day: isoDay(m[1]), amounts: poundsIn(m[2]), text: m[2] }));
       const moved = movements.some((m) => m.day && Math.abs(daysBetween(m.day, txDay(tx))) <= 2 && m.amounts.some((a) => samePence(tx, a)));
       const heldBy = [...md.matchAll(/Account (.+?) is held by (.+?)\.(?:\s|$)/g)].some((m) => sameName(m[2], ctx.name) && sameAccount(m[1], tx.counterparty_account));
-      const account = field2(md, "Account");
+      const account = field(md, "Account");
       const named = !tx.counterparty_name || sameName(tx.counterparty_name, ctx.name) || sameName(tx.counterparty_name, accountName) || isHolder && holders.some((h) => sameName(h, tx.counterparty_name));
       const ok = heldBy && moved || isHolder && named && sameAccount(account, tx.counterparty_account) && (!/ending/i.test(account ?? "") || moved);
       if (!ok) continue;
@@ -791,7 +864,7 @@ function invoices(ctx, add) {
     const accountOnly = payTo && /^(?:IBAN|account)\b/i.test(payTo);
     const payee = namedDestination ? namedDestination[1] : accountOnly ? void 0 : payTo;
     const account = namedDestination ? namedDestination[2] : accountOnly ? payTo : void 0;
-    const ref = /\b(INV \d+|CARRIER \d+|PO \d+)\b/.exec(title(md))?.[1] ?? /\border (PO \d+)\b/i.exec(field2(md, "Goods") ?? "")?.[1] ?? field2(md, "Invoice number");
+    const ref = /\b(INV \d+|CARRIER \d+|PO \d+)\b/.exec(title(md))?.[1] ?? /\border (PO \d+)\b/i.exec(field(md, "Goods") ?? "")?.[1] ?? field(md, "Invoice number");
     if (!issuers.length && !payee) continue;
     for (const tx of ctx.history) {
       if (tx.direction === "out" && ref && refHas(tx, ref) && relevant.has(tx.transaction_id) && !samePence(tx, amount) && recentBefore(doc, tx, 60) && issuers.length > 0 && issuers.every((issuer) => sameName(tx.counterparty_name, issuer))) {
@@ -830,7 +903,7 @@ function heldPaymentReceipt(ctx, add) {
     const merchant = fromTitle(doc, /^Receipt from (.+)$/i);
     const day = dated(doc);
     const amounts = [...doc.markdown.matchAll(/\bwe(?:['’]ve| have) (?:successfully )?(?:received|processed) your payment of (£[\d,.]+)(?=[.!?\s]|$)/gi)];
-    if (amounts.length !== 1 || !sameName(merchant, held.counterparty_name) || txDay(held) !== day || isoDay(field2(doc.markdown, "Dated")) !== day || /\b(?:not received|not processed|not yet|pending|partial payment|declined|reversed|refunded)\b/i.test(doc.markdown)) return false;
+    if (amounts.length !== 1 || !sameName(merchant, held.counterparty_name) || txDay(held) !== day || isoDay(field(doc.markdown, "Dated")) !== day || /\b(?:not received|not processed|not yet|pending|partial payment|declined|reversed|refunded)\b/i.test(doc.markdown)) return false;
     const amount = parseGbp(amounts[0][1].replace(/\.$/, ""))?.minorUnits;
     if (!samePence(held, amount)) return false;
     const transactions = ctx.history.filter((tx) => tx.direction === "out" && txDay(tx) === day && sameName(tx.counterparty_name, merchant) && samePence(tx, amount));
@@ -907,8 +980,8 @@ function completionStatements(ctx, add) {
   for (const doc of ofType(ctx, "completion_statement")) {
     const firm = fromTitle(doc, /^Completion statement from (.+)$/i);
     const paid = pounds(/\*\*Paid to[^*]*:\*\*\s*(£[\d,.]+)/i.exec(doc.markdown)?.[1]);
-    const [sale, mortgage, fees] = ["Sale price", "Mortgage redeemed", "Fees"].map((l) => pounds(field2(doc.markdown, l)));
-    if (!firm || paid === void 0 || !sameName(field2(doc.markdown, "Client"), ctx.name)) continue;
+    const [sale, mortgage, fees] = ["Sale price", "Mortgage redeemed", "Fees"].map((l) => pounds(field(doc.markdown, l)));
+    if (!firm || paid === void 0 || !sameName(field(doc.markdown, "Client"), ctx.name)) continue;
     if (sale !== void 0 && mortgage !== void 0 && fees !== void 0 && Math.abs(sale - mortgage - fees - paid) > 2) continue;
     for (const tx of incoming(ctx)) {
       if (tx.counterparty_name && nameKey(tx.counterparty_name).startsWith(nameKey(firm)) && samePence(tx, paid) && recentBefore(doc, tx, 30)) {
@@ -949,8 +1022,8 @@ function giftLetters(ctx, add) {
 }
 function saleParties(md) {
   const person = String.raw`([A-Z][A-Za-z'’-]+(?: [A-Z][A-Za-z'’-]+)+)`;
-  const seller = field2(md, "Seller")?.split(",")[0] ?? new RegExp(String.raw`\bfrom ${person} to ${person}`).exec(md)?.[1] ?? new RegExp(String.raw`\bI, ${person}, (?:hereby |have (?:today |this day )?)?(?:sold|confirm the sale|acknowledge the sale)`).exec(md)?.[1] ?? new RegExp(String.raw`\b${person} has sold\b`).exec(md)?.[1] ?? new RegExp(String.raw`^Seller:\s*${person}`, "m").exec(md)?.[1];
-  const buyer = field2(md, "Buyer")?.split(",")[0] ?? new RegExp(String.raw`\bfrom ${person} to ${person}`).exec(md)?.[2] ?? new RegExp(String.raw`\bto ${person}(?:\.| for\b|,)`).exec(md)?.[1] ?? new RegExp(String.raw`^Buyer:\s*${person}`, "m").exec(md)?.[1] ?? new RegExp(String.raw`Received from ${person}`).exec(md)?.[1];
+  const seller = field(md, "Seller")?.split(",")[0] ?? new RegExp(String.raw`\bfrom ${person} to ${person}`).exec(md)?.[1] ?? new RegExp(String.raw`\bI, ${person}, (?:hereby |have (?:today |this day )?)?(?:sold|confirm the sale|acknowledge the sale)`).exec(md)?.[1] ?? new RegExp(String.raw`\b${person} has sold\b`).exec(md)?.[1] ?? new RegExp(String.raw`^Seller:\s*${person}`, "m").exec(md)?.[1];
+  const buyer = field(md, "Buyer")?.split(",")[0] ?? new RegExp(String.raw`\bfrom ${person} to ${person}`).exec(md)?.[2] ?? new RegExp(String.raw`\bto ${person}(?:\.| for\b|,)`).exec(md)?.[1] ?? new RegExp(String.raw`^Buyer:\s*${person}`, "m").exec(md)?.[1] ?? new RegExp(String.raw`Received from ${person}`).exec(md)?.[1];
   return { seller, buyer };
 }
 function saleReceipts(ctx, add) {
@@ -959,7 +1032,7 @@ function saleReceipts(ctx, add) {
     const amount = onlyPounds(doc.markdown);
     if (!sameName(seller, ctx.name) || sameName(buyer, ctx.name) || amount === void 0) continue;
     const registration = /registration ([A-Z]{2}\d{2} ?[A-Z]{3})/.exec(doc.markdown)?.[1];
-    const support = ofType(ctx, "insurance_schedule", "advert").filter((other) => other.metadata.type === "advert" ? new RegExp(`Seller:\\s*${ctx.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i").test(other.markdown) : !!registration && sameName(field2(other.markdown, "Policyholder"), ctx.name) && norm(field2(other.markdown, "Vehicle") ?? "").includes(norm(registration)));
+    const support = ofType(ctx, "insurance_schedule", "advert").filter((other) => other.metadata.type === "advert" ? new RegExp(`Seller:\\s*${ctx.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i").test(other.markdown) : !!registration && sameName(field(other.markdown, "Policyholder"), ctx.name) && norm(field(other.markdown, "Vehicle") ?? "").includes(norm(registration)));
     for (const tx of incoming(ctx)) {
       if (isCash(tx) && samePence(tx, amount) && recentBefore(doc, tx, 7)) {
         add(tx, {
@@ -1039,12 +1112,12 @@ function cashReconciliations(ctx, add) {
 function bookingConfirmations(ctx, add) {
   for (const doc of ofType(ctx, "booking_confirmation")) {
     const md = doc.markdown;
-    const [perPerson, total] = poundsIn(field2(md, "Price") ?? "");
-    const count = Number(field2(md, "Travellers"));
-    const payment = /to (.+?), account (.+?), reference (\S+)/.exec(field2(md, "Payment") ?? "");
-    const due = isoDay(/due by (\d{1,2} [A-Za-z]+ \d{4})/.exec(field2(md, "Payment") ?? "")?.[1]);
+    const [perPerson, total] = poundsIn(field(md, "Price") ?? "");
+    const count = Number(field(md, "Travellers"));
+    const payment = /to (.+?), account (.+?), reference (\S+)/.exec(field(md, "Payment") ?? "");
+    const due = isoDay(/due by (\d{1,2} [A-Za-z]+ \d{4})/.exec(field(md, "Payment") ?? "")?.[1]);
     const travellers = [...md.matchAll(/^\s*\d+\.\s+(.+?)\s*$/gm)].map((m) => m[1]);
-    if (!sameName(field2(md, "Lead traveller"), ctx.name) || !perPerson || !total || !payment || perPerson * count !== total || travellers.length !== count) continue;
+    if (!sameName(field(md, "Lead traveller"), ctx.name) || !perPerson || !total || !payment || perPerson * count !== total || travellers.length !== count) continue;
     const unpaid = new Set(travellers.filter((t) => !sameName(t, ctx.name)).map(nameKey));
     for (const tx of incoming(ctx)) {
       const key = tx.counterparty_name ? nameKey(tx.counterparty_name) : "";
@@ -1118,15 +1191,15 @@ function vehicleFinance(ctx, add) {
   }
   for (const doc of ofType(ctx, "dealer_invoice")) {
     const heading = /^Invoice (INV \d+) from (.+)$/i.exec(title(doc.markdown));
-    const amount = pounds(field2(doc.markdown, "Paid by bank transfer")) ?? pounds(field2(doc.markdown, "Price"));
-    if (!heading || !sameName(field2(doc.markdown, "Customer"), ctx.name)) continue;
+    const amount = pounds(field(doc.markdown, "Paid by bank transfer")) ?? pounds(field(doc.markdown, "Price"));
+    if (!heading || !sameName(field(doc.markdown, "Customer"), ctx.name)) continue;
     for (const tx of outgoing(ctx)) {
       if (sameName(tx.counterparty_name, heading[2]) && refHas(tx, heading[1]) && samePence(tx, amount) && recentBefore(doc, tx, 14)) {
         add(tx, {
           code: "INVOICE_MATCHES",
           docs: [doc.metadata.doc_id],
           related: [],
-          fact: `${doc.metadata.doc_id} (${heading[1]}) from ${heading[2]} bills ${label(ctx.name)} for ${field2(doc.markdown, "Vehicle") ?? "a vehicle"}, matching ${describe(tx)}`
+          fact: `${doc.metadata.doc_id} (${heading[1]}) from ${heading[2]} bills ${label(ctx.name)} for ${field(doc.markdown, "Vehicle") ?? "a vehicle"}, matching ${describe(tx)}`
         });
       }
     }
@@ -1134,9 +1207,9 @@ function vehicleFinance(ctx, add) {
 }
 function hospitalInvoices(ctx, add) {
   for (const doc of ofType(ctx, "hospital_invoice")) {
-    const patient = field2(doc.markdown, "Patient");
-    const amount = pounds(field2(doc.markdown, "Amount due"));
-    const payee = field2(doc.markdown, "Pay to")?.split(",")[0];
+    const patient = field(doc.markdown, "Patient");
+    const amount = pounds(field(doc.markdown, "Amount due"));
+    const payee = field(doc.markdown, "Pay to")?.split(",")[0];
     if (!patient || !payee || surname(patient) !== surname(ctx.name)) continue;
     const chats = ofType(ctx, "support_chat").filter((chat) => norm(chat.markdown).includes(norm(patient)));
     for (const tx of outgoing(ctx)) {
@@ -1216,8 +1289,8 @@ function cashRedeposits(ctx, add) {
 var refHasText = (text2, ref) => new RegExp(`\\b${ref.replace(/\s+/g, "\\s+")}\\b`, "i").test(text2);
 function contractSchedules(ctx, add) {
   for (const doc of ofType(ctx, "contract_schedule")) {
-    const supplier = field2(doc.markdown, "Supplier")?.split(",")[0];
-    const prefix = field2(doc.markdown, "Project")?.split(/\s+/)[0];
+    const supplier = field(doc.markdown, "Supplier")?.split(",")[0];
+    const prefix = field(doc.markdown, "Project")?.split(/\s+/)[0];
     const rows = tableRows(doc.markdown, ["stage", "due", "amount"]);
     if (!supplier || !prefix) continue;
     for (const tx of outgoing(ctx)) {
@@ -1294,7 +1367,7 @@ function invoiceFinance(ctx, add) {
   for (const doc of ofType(ctx, "remittance_advice")) {
     const financier = fromTitle(doc, /^Remittance advice from (.+)$/i);
     const advance = pounds(/\*\*Advance[^*]*:\*\*\s*(£[\d,.]+)/i.exec(doc.markdown)?.[1]);
-    if (!financier || !sameName(field2(doc.markdown, "Client"), ctx.name)) continue;
+    if (!financier || !sameName(field(doc.markdown, "Client"), ctx.name)) continue;
     const agreements = ofType(ctx, "factoring_agreement").filter((a) => norm(a.markdown).includes(norm(financier)) && norm(a.markdown).includes(norm(ctx.name)));
     for (const tx of incoming(ctx)) {
       if (sameName(tx.counterparty_name, financier) && samePence(tx, advance) && recentBefore(doc, tx, 3)) {
@@ -1798,7 +1871,7 @@ function customerDocs(pack, ...types) {
   return pack.documents.filter((doc) => doc.metadata.customer_id === pack.customer.customer_id && types.includes(doc.metadata.type));
 }
 function companyOf(doc) {
-  return field2(doc.markdown, "Company") ?? /^Company register extract for (.+?)(?::.*)?$/i.exec(title(doc.markdown))?.[1];
+  return field(doc.markdown, "Company") ?? /^Company register extract for (.+?)(?::.*)?$/i.exec(title(doc.markdown))?.[1];
 }
 function controllers(doc) {
   return [
@@ -1883,7 +1956,7 @@ function findSignals(pack, explained) {
   const registers = pack.documents.filter((doc) => doc.metadata.type === "company_register_extract" || doc.metadata.type === "significant_control_register");
   for (const tx of flagged.filter((t) => t.direction === "in" && t.counterparty_name)) {
     const register = registers.find((doc) => sameName(companyOf(doc), tx.counterparty_name));
-    const dissolved = register && isoDay(/^Dissolved on (.+)$/i.exec(field2(register.markdown, "Status") ?? "")?.[1]);
+    const dissolved = register && isoDay(/^Dissolved on (.+)$/i.exec(field(register.markdown, "Status") ?? "")?.[1]);
     if (!register || !dissolved || dissolved > txDay(tx)) continue;
     const onward = flagged.filter((t) => t.direction === "out" && !explained.byTx.has(t.transaction_id) && t.amount_gbp >= 500 && !sameName(t.counterparty_name, pack.customer.name));
     const individuals = new Set(onward.filter((t) => !looksLikeOrganization(t.counterparty_name)).map((t) => nameKey(t.counterparty_name ?? "")));
@@ -2127,7 +2200,17 @@ function gapFor(pack, alert, open, index) {
         fact: `${alert.rule_id} flagged repeated cash amounts just under the threshold, including ${what}, with no business records on file`,
         request: `Ask ${name} for the takings or collection records behind each flagged cash payment in the review window`
       };
-    case "TM08":
+    case "TM08": {
+      if (pack.caseRecord.institution === "investment" && open.length && open.every((tx) => tx.direction === "in")) {
+        const deposits = open.map(describe).join("; ");
+        return {
+          code: "RFI_SOURCE_OF_FUNDS",
+          rank,
+          evidence: open.map((tx) => tx.transaction_id),
+          fact: `TM08 flagged funding from an account not in ${name}'s name: ${deposits}`,
+          request: `Ask ${name} for proof of the source of the flagged deposit${open.length === 1 ? "" : "s"}, such as a donor letter, completion statement or sending-account statement that links the money and the sender to ${name}`
+        };
+      }
       return {
         code: "RFI_COUNTERPARTY_DETAILS",
         rank,
@@ -2135,6 +2218,7 @@ function gapFor(pack, alert, open, index) {
         fact: `${alert.rule_id} flagged ${what} from an account not in ${name}'s name`,
         request: `Ask ${name} who ${subject?.counterparty_name ? label4(subject.counterparty_name) : "the other party"} is, their relationship to the customer, and the document behind the transfer`
       };
+    }
     case "TM10": {
       const sold = largest2(open.filter((tx) => tx.channel === "fund_redemption")) ?? subject;
       const bought = largest2(open.filter((tx) => tx.channel === "fund_subscription"));
@@ -2191,6 +2275,8 @@ function decideCase(pack, findings = NO_FINDINGS) {
   if (heldPayment) flagged.set(heldPayment.transaction_id, heldPayment);
   const suspicions = [];
   const gaps = [];
+  const investmentFundingRequested = /* @__PURE__ */ new Set();
+  const investmentProfileGaps = [];
   const covers = [];
   const rankOf = (code2) => SUSPICION_ORDER.indexOf(code2) + 1;
   const { from } = caseRecord.review_window;
@@ -2254,6 +2340,11 @@ function decideCase(pack, findings = NO_FINDINGS) {
         suspicions.push({ ...suspicion, rank: rankOf(suspicion.code) });
         continue;
       }
+      const incidental = incidentalEmoneyMovements(pack, relevant, open, explanations, isCrypto);
+      if (incidental) {
+        covers.push({ alert, code: closeCode(explanations), residualFact: incidental.fact, evidence: incidental.evidence, explanations });
+        continue;
+      }
     }
     if (alert.rule_id === "TM06") {
       const people = new Set(open.filter((tx) => !looksLikeOrganization(tx.counterparty_name) && !sameName(tx.counterparty_name, customer.name)).map((tx) => nameKey(tx.counterparty_name ?? "")));
@@ -2284,7 +2375,21 @@ function decideCase(pack, findings = NO_FINDINGS) {
         continue;
       }
     }
-    gaps.push(gapFor(pack, alert, open, index));
+    if (caseRecord.institution === "investment" && alert.rule_id === "TM01" && open.length && open.every((tx) => tx.direction === "in" && !index.unexplainedOnward.has(tx.transaction_id))) {
+      investmentProfileGaps.push({ alert, open });
+      continue;
+    }
+    const gap = gapFor(pack, alert, open, index);
+    if (caseRecord.institution === "investment" && alert.rule_id === "TM08" && gap.code === "RFI_SOURCE_OF_FUNDS") {
+      for (const id of gap.evidence) investmentFundingRequested.add(id);
+    }
+    gaps.push(gap);
+  }
+  for (const { alert, open } of investmentProfileGaps) {
+    const remaining = open.filter((tx) => !investmentFundingRequested.has(tx.transaction_id));
+    if (remaining.length && (remaining.length === open.length || !covered(pack, alert, open, remaining))) {
+      gaps.push(gapFor(pack, alert, remaining, index));
+    }
   }
   let heldSupport;
   if (caseRecord.institution === "payments_fx" && heldPayment) {
@@ -2354,9 +2459,11 @@ function decideCase(pack, findings = NO_FINDINGS) {
     const documented = distinct(items.filter((item) => item.explanation.code !== "WITHIN_PROFILE" || item.explanation.docs.length).sort((a, b) => b.tx.amount_gbp - a.tx.amount_gbp).map((item) => item.explanation.fact));
     const lead = special?.fact;
     const facts = distinct([...lead ? [lead] : [], ...heldSupport ? [heldSupport.explanation.fact] : [], ...documented]).slice(0, 2);
+    const residual = covers.find((cover) => cover.residualFact)?.residualFact;
     reason = [
       ...facts.length ? facts : [`The flagged activity fits ${name}'s declared profile`],
-      `Together the evidence explains all the activity behind ${rules}${heldPayment ? ", so the held payment can be released" : ""}`
+      ...residual ? [residual] : [],
+      `Together the evidence explains ${residual ? "" : "all "}the activity behind ${rules}${heldPayment ? ", so the held payment can be released" : ""}`
     ];
     evidence = distinct([
       ...covers.flatMap((cover) => cover.evidence),

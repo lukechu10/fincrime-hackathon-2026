@@ -140,6 +140,65 @@ test("TM02 needs the material onward payment explained even when the incoming fu
   assert.equal(run(onward, [letter, invoice]).verdict, "CLOSE");
 });
 
+test("e-money TM02 separates a documented transfer from ordinary same-wallet activity", () => {
+  const wallet = { account_id: "WALLET" };
+  const inTx = tx("IN", "in", 3300, "Robin Tester", { ...wallet, counterparty_account: "11-22-33 44556677", booked_at: "2026-09-10T10:00:00Z" });
+  const outTx = tx("OUT", "out", 3300, "Robin Tester", { ...wallet, counterparty_account: "11-22-33 11223344", booked_at: "2026-09-11T10:00:00Z" });
+  const residual = tx("CASH", "out", 70, null, { ...wallet, channel: "cash_withdrawal" });
+  const prior = tx("PRIOR", "out", 80, null, { ...wallet, channel: "cash_withdrawal", booked_at: "2026-08-16T10:00:00Z" });
+  const statement = (id: string, account: string) => doc(id, "bank_statement", `# Bank statement\n**Account holder:** Robin Tester\n**Account:** ${account}`);
+  const source = statement("SRC", "11-22-33 44556677"), destination = statement("DST", "11-22-33 11223344");
+  const run = (options: { extra?: BankTransaction; main?: BankTransaction; history?: BankTransaction; docs?: EvidenceDocument[] } = {}) => {
+    const txs = [inTx, options.main ?? outTx, options.extra ?? residual];
+    return decide({ institution: "emoney", txs, prior: [options.history ?? prior],
+      docs: options.docs ?? [source, destination], alerts: [alert("A1", "TM02", txs)] });
+  };
+  const close = run();
+  assert.equal(close.verdict, "CLOSE");
+  assert.equal(close.reason_code, "OWN_ACCOUNT");
+  assert.deepEqual(new Set(close.evidence), new Set(["SRC", "DST", "IN", "OUT", "CASH", "PRIOR"]));
+  assert.match(close.reason, /£70\.00 paid out fits prior activity/);
+  assert.equal(run({ docs: [source] }).verdict, "RFI", "one proven leg is not enough");
+  assert.equal(run({ extra: { ...residual, amount_gbp: 140 } }).verdict, "RFI", "the volume exceeds history");
+  assert.equal(run({ main: { ...outTx, booked_at: "2026-09-12T10:01:00Z" } }).verdict, "RFI");
+  assert.equal(run({ history: { ...prior, account_id: "OTHER" } }).verdict, "RFI");
+  assert.equal(run({ history: { ...prior, booked_at: "2026-09-13T10:00:00Z" } }).verdict, "RFI");
+  assert.equal(run({ extra: { ...residual, counterparty_country: "Russia" } }).verdict, "RFI");
+  const priorWallet = { ...prior, channel: "wallet_transfer", counterparty_name: "Casey Fixture" };
+  assert.equal(run({ history: priorWallet,
+    extra: { ...residual, channel: "wallet_transfer", counterparty_name: "Casey Fixture", reference: "BTC PURCHASE" } }).verdict, "RFI");
+  const report = doc("FRAUD", "sending_bank_fraud_report", "# Report\n\n**Subject:** Unauthorised transfer");
+  assert.equal(run({ docs: [source, destination, report] }).verdict, "ESCALATE");
+});
+
+test("e-money TM02 still reconciles the booking or tenancy payment before treating a withdrawal as background", () => {
+  const wallet = { account_id: "WALLET" };
+  const cash = tx("CASH", "out", 65, null, { ...wallet, channel: "cash_withdrawal" });
+  const history = tx("PRIOR", "out", 90, null, { ...wallet, channel: "cash_withdrawal", booked_at: "2026-08-16T10:00:00Z" });
+  const run = (principal: BankTransaction[], docs: EvidenceDocument[]) => {
+    const txs = [...principal, cash];
+    return decide({ institution: "emoney", txs, prior: [history], docs, alerts: [alert("A1", "TM02", txs)] });
+  };
+  const booking = doc("BOOK", "booking_confirmation", bookingBody.replace("£200.00 per person, £600.00", "£1,100.00 per person, £3,300.00"), "2026-09-01");
+  const contributions = [tx("P1", "in", 1100, "Alex One", { ...wallet, booked_at: "2026-09-04T10:00:00Z" }),
+    tx("P2", "in", 1100, "Casey Two", { ...wallet, booked_at: "2026-09-11T10:00:00Z" })];
+  const payment = tx("PAY", "out", 3300, "Example Travel Ltd", { ...wallet, counterparty_account: "10-20-30 40506070", reference: "BOOKING TRIP1" });
+  assert.equal(run([...contributions, payment], [booking]).reason_code, "COLLECTION_DOCUMENTED");
+  assert.equal(run([...contributions, { ...payment, reference: "DIFFERENT BOOKING" }], [booking]).verdict, "RFI");
+
+  const refund = tx("RETURN", "in", 1900, "Former Letting Ltd", { ...wallet, booked_at: "2026-09-11T10:00:00Z" });
+  const topup = tx("TOPUP", "in", 500, "Robin Tester", { ...wallet, booked_at: "2026-09-11T11:00:00Z" });
+  const next = tx("NEXT", "out", 2400, "New Letting Ltd", wallet);
+  const letters = [doc("RETURN-LETTER", "deposit_return_letter", "# Deposit return from Former Letting Ltd\n\nYour deposit of £1,900.00 has been returned."),
+    doc("RECEIPT", "holding_deposit_receipt", "# Holding deposit receipt from New Letting Ltd\n\nWe received £2,400.00 for the new tenancy.", "2026-09-12")];
+  const tenancy = run([refund, topup, next], letters);
+  assert.equal(tenancy.reason_code, "DOCUMENTED_EVENT");
+  assert.ok(tenancy.evidence.includes("TOPUP"));
+  assert.match(tenancy.reason, /top-up in the customer's name/);
+  assert.equal(run([refund, { ...topup, amount_gbp: 499.99 }, next], letters).verdict, "RFI");
+  assert.equal(run([refund, { ...topup, counterparty_name: "Unknown Sender" }, next], letters).verdict, "RFI");
+});
+
 test("a staff note about staying under a threshold escalates as structuring, ahead of other findings", () => {
   const cash = [900, 950, 980].map((amount, i) => tx(`C${i}`, "in", amount, null, { channel: "cash_topup" }));
   const note = doc("N1", "staff_note", "# Note by outlet\n\nThe customer asked whether keeping each top-up below £1,000 would avoid identity checks.");
@@ -268,12 +327,28 @@ test("a single undocumented commercial payment to a higher-risk country is an RF
   assert.equal(spread.reason_code, "ESC_HIGH_RISK_CORRIDOR");
 });
 
-test("several requests without suspicion become one RFI, and an explained alert never hides an unexplained one", () => {
+test("investment TM08 asks for the source of an unexplained deposit without duplicating the TM01 request", () => {
   const credit = tx("I1", "in", 20000, "Some Firm LLP client account", { reference: "SALE PROCEEDS", counterparty_account: "10-20-30 99887766" });
-  const result = decide({ institution: "investment", txs: [credit],
-    alerts: [alert("A1", "TM01", [credit], { received_gbp: 20000, baseline_gbp: 3000, limit_multiple: 3 }), alert("A2", "TM08", [credit])] });
-  assert.equal(result.verdict, "RFI");
-  assert.match(result.reason, /Ask Robin Tester/);
+  const other = tx("I2", "in", 10000, "Unrelated Sender");
+  const tm08 = alert("A2", "TM08", [credit]);
+  const tm01 = (txs: BankTransaction[]) => alert("A1", "TM01", txs, { baseline_gbp: 3000, limit_multiple: 3 });
+  for (const alerts of [[tm08], [tm01([credit]), tm08], [tm08, tm01([credit])]]) {
+    const result = decide({ institution: "investment", txs: [credit], alerts });
+    assert.equal(result.verdict, "RFI");
+    assert.equal(result.reason_code, "RFI_SOURCE_OF_FUNDS");
+    assert.match(result.reason, /Ask Robin Tester for proof of the source/);
+    assert.doesNotMatch(result.reason, /and also/);
+    assert.deepEqual(result.evidence, ["I1"]);
+  }
+  const separate = decide({ institution: "investment", txs: [credit, other], alerts: [tm01([credit, other]), tm08] });
+  assert.equal(separate.reason_code, "RFI_SOURCE_OF_FUNDS");
+  assert.match(separate.reason, /and also .*Unrelated Sender/);
+  assert.deepEqual(separate.evidence, ["I1", "I2"]);
+  const baselineTopup = tx("I3", "in", 40, "Robin Tester");
+  const withinProfile = decide({ institution: "investment", txs: [credit, baselineTopup], alerts: [tm08, tm01([credit, baselineTopup])] });
+  assert.doesNotMatch(withinProfile.reason, /and also/);
+  assert.deepEqual(withinProfile.evidence, ["I1"]);
+  assert.equal(decide({ institution: "payments_fx", txs: [credit], alerts: [tm08] }).reason_code, "RFI_COUNTERPARTY_DETAILS");
 });
 
 test("a contract payment schedule closes stage payments only on the exact due date and amount", () => {

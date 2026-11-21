@@ -103,6 +103,7 @@ Update this section when changing decision logic or completing a review round. R
   - **Not yet measured:** no live run yet, because no key was available in this environment.
   - **Expected effect on development data:** about 250 concern checks across 4,000 cases, and no payment-document calls.
   - **Risk:** a false concern on a development case would escalate it and change the committed outputs.
+- **Investment TM08 and e-money TM02 review:** unexplained investment deposits now request evidence of the source and its link to the sender; overlapping TM01 requests are merged by transaction without dropping independent gaps. All 72 development reason-code mismatches are resolved with no investment verdict changes. E-money TM02 now separates a reconciled main booking, own-account or tenancy flow from small domestic outflows that stay below the standalone trigger and within prior ten-day volumes for the same wallet and channel. Suspicion still takes precedence. This closes 39 of 52 review cases; 13 stay at RFI because the residual volume exceeds the observed comparator (10 bookings, two own-account transfers and one tenancy deposit). Do not treat the local CLOSE labels as proof these exceptions are safe. Development cost fell from 156 to 39 with no labelled wrongful closes. Synthetic verdicts and total cost (33) are unchanged; four investment RFI codes changed, with no net change in exact code agreement. All 69 tests and typechecked build passed; five runs of both datasets were byte-identical. Next, review the 13 remaining files for independent evidence rather than widening the allowance to fit the labels.
 - **Next priority:**
   - **Live-test the fallback with a key:**
     - Run the synthetic suite five times and check that verdicts and codes repeat.
@@ -111,7 +112,6 @@ Update this section when changing decision logic or completing a review round. R
   - **Cover early redemption (IV-01) in the fallback**, or relax the redundancy letter's title parsing.
   - **Measure generalization:** hand-check a fresh stratified sample of outputs, especially every CLOSE path, for wording and evidence quality.
   - **Stress-test trap variants** by mutating development cases: change an amount, donor, account or date, and confirm closes fall away.
-  - **Decide the no-document TM08 reason code.**
   - **Optional LLM review:** consider it only for documents no parser recognizes, keeping the final decision deterministic.
 
 ## Submission contract

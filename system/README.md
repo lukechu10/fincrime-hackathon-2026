@@ -54,7 +54,7 @@ The decision logic is deterministic. An optional language-model reader can add c
    - **Internal-list matches (TM22)** use the list assessment. Registers are read on the transaction date: a role with no end date continues after the register's own date, but is not backdated before its start. A gift letter's stated date of birth counts as identity evidence.
    - **Every other alert** is covered when what remains unexplained falls below that rule's own threshold:
      - TM01: only the customer's own top-ups may remain, within the rule's multiple.
-     - TM02: the remaining unexplained inflow is below £2,000 **and** every material flagged onward payment is explained.
+     - TM02: the remaining unexplained inflow is below £2,000 **and** every material flagged onward payment is explained. For e-money, a reconciled booking, own-account transfer or tenancy-deposit flow can explain the trigger without treating every attached transaction as part of it. Residual domestic wallet transfers and ATM withdrawals must be below the separate trigger amount and within prior ten-day volumes on the same wallet and channel. Suspicious or unsupported residual activity still prevents closure.
      - TM04: the remaining counterparties are within the limit.
      - TM06 and TM07: the remaining amount is below the limit.
      - All other rules: nothing may remain.
@@ -62,7 +62,7 @@ The decision logic is deterministic. An optional language-model reader can add c
      - Rapid movement on to crypto (recognised from the payee's name or a reference naming a crypto asset), individuals abroad or several unrelated people.
      - Higher-risk-country payments with several unrelated individuals.
      - Third-party payouts at investment.
-   - **Otherwise it becomes one specific request.** An unexplained outflow asks for purpose documents and an unexplained inflow for source of funds. Rule-specific requests cover cash records, counterparty details and reasons for early redemption.
+   - **Otherwise it becomes one specific request.** An unexplained outflow asks for purpose documents and an unexplained inflow for source of funds. At investment, TM08 requests evidence linking the source and sender to the deposit; if TM01 asks about the same deposit it is not requested twice. Rule-specific requests also cover cash records, counterparty details and reasons for early redemption.
 4. **Aggregate.**
    - **Any suspicion wins:** escalate with fixed precedence: listed party, structuring, invoice mismatch, account misuse, early redemption, high-risk corridor, unexplained funds, mule activity, pass-through, then third-party funding.
    - **Otherwise any gap gives one RFI:** the identity question comes first, then the payments/FX release gate, then purpose before source. Other requests are listed in the same reason.
