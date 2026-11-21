@@ -81,6 +81,7 @@ Update this section when changing decision logic or completing a review round. R
     - a redundancy redemption becomes an RFI instead of closing;
     - a refund whose original payment is outside the window becomes an RFI;
     - an invoice diversion becomes an RFI instead of escalating.
+- **Early-redemption evidence fix:** the redundancy path now checks the fund pair named by each TM10 alert and requires a matching employer letter dated during the holding plus a customer sale request citing redundancy, dated between the letter and the sale. It no longer infers a request or claims a living-cost purpose. All 62 tests and the type-checked bundle build passed. Regenerating all four development outputs left all 4,000 verdicts and reason codes unchanged; only the 46 redundancy explanation texts changed. Across the expanded 40-case synthetic suite, `SYN-IV-07-CS` was the only change (CLOSE to RFI); cost fell from 61 to 51, with zero wrongful closes and byte-identical outputs on five runs. This remains a targeted local suite, and reworded evidence not recognized by the parser can still fall to RFI.
 - **Next priority:**
   - **Make the escalation signals robust to rewording** (structuring notes, invoice diversion); the synthetic suite shows both falling to RFI.
   - **Measure generalization:** hand-check a fresh stratified sample of outputs, especially every CLOSE path, for wording and evidence quality.

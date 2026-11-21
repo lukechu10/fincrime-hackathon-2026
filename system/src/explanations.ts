@@ -479,13 +479,22 @@ function redundancy(ctx: Context, add: Add): void {
     && !!employer && sameName(fromTitle(doc, /^Letter from (.+)$/i), employer));
   if (!letters.length) return;
   const emails = ofType(ctx, "customer_email").filter((doc) => /redundan/i.test(doc.markdown) && /\bsell\b/i.test(doc.markdown));
-  const fundMoves = ctx.subjects.filter((tx) => tx.channel === "fund_redemption" || tx.channel === "fund_subscription");
-  const redemptions = fundMoves.filter((tx) => tx.channel === "fund_redemption");
-  for (const tx of fundMoves) {
-    const letter = letters.find((doc) => redemptions.some((r) => dated(doc) <= txDay(r)));
+  for (const alert of ctx.pack.alerts.filter((a) => a.rule_id === "TM10")) {
+    const moves = ctx.subjects.filter((tx) => alert.transaction_ids.includes(tx.transaction_id));
+    const buys = moves.filter((tx) => tx.channel === "fund_subscription" && tx.direction === "out");
+    const sales = moves.filter((tx) => tx.channel === "fund_redemption" && tx.direction === "in");
+    if (buys.length !== 1 || sales.length !== 1) continue;
+    const [buy] = buys;
+    const [sale] = sales;
+    if (!buy?.counterparty_name || !sale?.counterparty_name || !sameName(buy.counterparty_name, sale.counterparty_name)) continue;
+    // A letter predating the purchase does not explain a change in circumstances during this holding.
+    const letter = letters.find((doc) => txDay(buy) <= dated(doc) && dated(doc) <= txDay(sale)
+      && emails.some((email) => dated(doc) <= dated(email) && dated(email) <= txDay(sale)));
     if (!letter) continue;
-    add(tx, { code: "DOCUMENTED_EVENT", docs: [letter.metadata.doc_id, ...emails.map((e) => e.metadata.doc_id)], related: [],
-      fact: `${letter.metadata.doc_id} from ${employer} confirms ${label(ctx.name)} was made redundant before the fund sale, which the customer requested to cover living costs (${describe(tx)})` });
+    const email = emails.find((doc) => dated(letter) <= dated(doc) && dated(doc) <= txDay(sale));
+    if (!email) continue;
+    for (const tx of [buy, sale]) add(tx, { code: "DOCUMENTED_EVENT", docs: [letter.metadata.doc_id, email.metadata.doc_id], related: [],
+      fact: `${letter.metadata.doc_id} from ${employer} records redundancy before the fund sale; ${email.metadata.doc_id} links that redundancy to the request to sell (${describe(tx)})` });
   }
 }
 

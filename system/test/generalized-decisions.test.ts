@@ -30,6 +30,28 @@ function decide(options: { alerts: BankAlert[]; txs: BankTransaction[]; docs?: E
   return decideCase(pack);
 }
 
+test("redundancy explains an early fund sale only with a letter and a timely request linking it to the sale", () => {
+  const buy = tx("BUY", "out", 2800, "Test Index Fund", { channel: "fund_subscription", booked_at: "2026-08-25T10:00:00Z" });
+  const sale = tx("SELL", "in", 2720, "Test Index Fund", { channel: "fund_redemption" });
+  const letter = (day: string) => doc("LETTER", "redundancy_letter", "# Letter from Tester Works Ltd\n\nWe are writing to confirm that your role is redundant.", day);
+  const email = (day: string) => doc("EMAIL", "customer_email", "# Email from the customer\n\nI've just been made redundant, so I need to sell my fund holding.", day);
+  const run = (docs: EvidenceDocument[], redeemed = sale) => decide({
+    institution: "investment", alerts: [alert("A1", "TM10", [buy, redeemed])], txs: [buy, redeemed], docs,
+  });
+  const current = letter("2026-09-03");
+  const request = email("2026-09-10");
+  const close = run([current, request]);
+  assert.equal(close.verdict, "CLOSE");
+  assert.equal(close.reason_code, "DOCUMENTED_EVENT");
+  assert.deepEqual(new Set(close.evidence), new Set(["LETTER", "EMAIL", "BUY", "SELL"]));
+  assert.doesNotMatch(close.reason, /living costs/);
+  for (const rfi of [run([letter("2025-07-03"), request]), run([current]), run([current, email("2026-09-13")]),
+    run([current, request], { ...sale, counterparty_name: "Unrelated Bond Fund" })]) {
+    assert.equal(rfi.verdict, "RFI");
+    assert.equal(rfi.reason_code, "RFI_PURPOSE_DOCUMENTS");
+  }
+});
+
 const giftBody = (amount: string, donor = "Sam Giver", born = "") =>
   `# Gift letter from ${donor}\n\n**Document ID:** G1\n**Dated:** 10 September 2026\n\nI, ${donor},${born} confirm that I am gifting the sum of ${amount} to my child, Robin Tester. It is non-repayable.`;
 
