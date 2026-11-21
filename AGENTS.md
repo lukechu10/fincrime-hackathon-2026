@@ -93,8 +93,22 @@ Update this section when changing decision logic or completing a review round. R
     - Synthetic cases: cost went from 51 to 33, with correct verdicts up from 23/40 to 29/40, zero wrongful closes, and all 40 reproducible across five runs.
     - Tests: five new regression tests plus one updated test, 67 in total, all passing except the Windows symlink test.
   - **Still open:** the remaining synthetic misses are wording and layout parses, such as solicitor and gift wording, prose contracts and ownership, and the insurer net of excess, plus three reason-code choices.
+- **LLM fallback reader (first version, `system/src/llm/`):**
+  - **What it does:** off unless `OPENROUTER_API_KEY` is set. After the deterministic pass it reads only documents no parser used, and only for non-escalated cases: payment evidence for RFIs, and notes, chats and emails for statements of concern in RFIs and closes.
+  - **Checks:** the model (`anthropic/claude-haiku-5.5`) returns facts with verbatim quotes. Code drops anything not quoted word for word and matches the rest with the parsers' literal rules. The unchanged decision logic then runs again.
+  - **Verification:**
+    - With no key, development outputs are byte-identical.
+    - Five new tests use a fake model: a reworded letter closes; unquoted, mismatched or conditional facts change nothing; an agent's words don't count; escalated cases are never sent; the client survives errors. 72 tests pass except the Windows symlink test.
+    - With hand-written ideal answers, correct synthetic verdicts go from 29/40 to 39/40, with no wrongful closes.
+  - **Not yet measured:** no live run yet, because no key was available in this environment.
+  - **Expected effect on development data:** about 250 concern checks across 4,000 cases, and no payment-document calls.
+  - **Risk:** a false concern on a development case would escalate it and change the committed outputs.
 - **Next priority:**
-  - **Make the free-text parsers robust to rewording**, or add the LLM fallback reader for documents no parser recognizes; the remaining synthetic misses are of this kind.
+  - **Live-test the fallback with a key:**
+    - Run the synthetic suite five times and check that verdicts and codes repeat.
+    - Run the development data and review every changed case, especially any new escalation from a concern check.
+    - Then regenerate the committed development outputs **with** the key, because organizers re-run the development cases with their key.
+  - **Cover early redemption (IV-01) in the fallback**, or relax the redundancy letter's title parsing.
   - **Measure generalization:** hand-check a fresh stratified sample of outputs, especially every CLOSE path, for wording and evidence quality.
   - **Stress-test trap variants** by mutating development cases: change an amount, donor, account or date, and confirm closes fall away.
   - **Decide the no-document TM08 reason code.**

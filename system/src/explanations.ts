@@ -650,7 +650,8 @@ function clientFunding(ctx: Context, add: Add, explained: ReadonlyMap<string, Ex
 }
 
 /** Build every transaction explanation for a case. The first matching explanation for a transaction wins. */
-export function explainTransactions(pack: InstitutionCasePack): ExplanationIndex {
+export function explainTransactions(pack: InstitutionCasePack,
+  extra: readonly { readonly tx: BankTransaction; readonly explanation: Explanation }[] = []): ExplanationIndex {
   const ctx = context(pack);
   const byTx = new Map<string, Explanation>();
   const add: Add = (tx, explanation) => { if (!byTx.has(tx.transaction_id)) byTx.set(tx.transaction_id, explanation); };
@@ -662,6 +663,8 @@ export function explainTransactions(pack: InstitutionCasePack): ExplanationIndex
     freightInvoices, groupCompanies, invoiceFinance, payroll, heldPaymentReceipt, establishedPayees]) {
     explain(ctx, add);
   }
+  // Checked facts from the fallback reader come after every parser, so they only fill gaps the parsers left.
+  for (const { tx, explanation } of extra) add(tx, explanation);
   const unexplainedOnward = new Map<string, BankTransaction>();
   clientFunding(ctx, add, byTx, unexplainedOnward);
   return { byTx, invoicePayeeConflicts, unexplainedOnward };

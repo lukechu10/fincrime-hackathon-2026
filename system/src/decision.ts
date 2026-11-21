@@ -1,6 +1,7 @@
 import type { BankAlert, BankTransaction, InstitutionCasePack } from "./bank-cases.js";
 import { describe, explainTransactions, type CloseCode, type Explanation, type ExplanationIndex } from "./explanations.js";
 import { assessListMatch } from "./list-assessment.js";
+import { NO_FINDINGS, type Findings } from "./llm/facts.js";
 import { findSignals, type Signal } from "./signals.js";
 import { daysBetween, looksLikeOrganization, nameKey, norm, pence, sameName, txDay } from "./text.js";
 
@@ -210,9 +211,10 @@ function gapFor(pack: InstitutionCasePack, alert: BankAlert, open: readonly Bank
   }
 }
 
-export function decideCase(pack: InstitutionCasePack): CaseDecision {
+/** Decide one case. `findings` are checked facts from the optional fallback reader; without them the decision is fully offline. */
+export function decideCase(pack: InstitutionCasePack, findings: Findings = NO_FINDINGS): CaseDecision {
   const { caseRecord, customer, alerts, documents, heldPayment } = pack;
-  const index = explainTransactions(pack);
+  const index = explainTransactions(pack, findings.explanations);
   const flagged = new Map(pack.flaggedTransactions.map((tx) => [tx.transaction_id, tx]));
   if (heldPayment) flagged.set(heldPayment.transaction_id, heldPayment);
   const suspicions: Suspicion[] = [];
@@ -228,7 +230,7 @@ export function decideCase(pack: InstitutionCasePack): CaseDecision {
     suspicions.push({ code: "ESC_MULE_ACTIVITY", rank: 0, evidence: [...reports.map((d) => d.metadata.doc_id), ...(sample ? [sample.transaction_id] : [])],
       fact: `Sending-bank fraud ${reports.length === 1 ? "report" : "reports"} ${reports.map((d) => d.metadata.doc_id).join(", ")} ${subjects.length ? `record ${subjects.join("; ")} for money paid into` : "raise a fraud concern about"} ${label(customer.name)}'s account${sample ? `, including ${describe(sample)}` : ""}` });
   }
-  for (const signal of findSignals(pack, index)) suspicions.push({ ...signal, rank: rankOf(signal.code) });
+  for (const signal of [...findSignals(pack, index), ...findings.signals]) suspicions.push({ ...signal, rank: rankOf(signal.code) });
 
   for (const alert of alerts) {
     const txs = alert.transaction_ids.map((id) => flagged.get(id)!).filter(Boolean);

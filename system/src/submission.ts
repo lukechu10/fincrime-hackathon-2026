@@ -3,6 +3,8 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { loadInstitutionCases, type CaseStub, type InstitutionCasePack } from "./bank-cases.js";
 import { decideCase, reasonCodes, type CaseDecision } from "./decision.js";
 import { warn } from "./diagnostics.js";
+import { findingsFor, planTasks, readAll, type Task } from "./llm/fallback.js";
+import { openRouterReader, type DocumentReader } from "./llm/openrouter.js";
 
 function verify(pack: InstitutionCasePack, result: CaseDecision): void {
   const { case_id, alert_ids } = pack.caseRecord;
@@ -46,7 +48,18 @@ const inside = (base: string, path: string) => {
   return !sub || (sub !== ".." && !sub.startsWith(`..${sep}`) && !isAbsolute(sub));
 };
 
-export function runSubmission(input: string, output: string): void {
+export interface RunOptions {
+  /** Reads documents the parsers could not use. Defaults to OpenRouter when OPENROUTER_API_KEY is set; null disables it. */
+  readonly reader?: DocumentReader | null;
+}
+
+/** The fallback reader for this run, if the evaluator supplied a key. */
+function defaultReader(): DocumentReader | undefined {
+  const apiKey = process.env.OPENROUTER_API_KEY?.trim();
+  return apiKey ? openRouterReader({ apiKey }) : undefined;
+}
+
+export async function runSubmission(input: string, output: string, options: RunOptions = {}): Promise<void> {
   const target = resolve(output);
   const inputRoot = realpathSync(input);
   const refuse = () => new Error("Output must not overwrite or be placed inside the supplied institution directory");
@@ -59,24 +72,48 @@ export function runSubmission(input: string, output: string): void {
   if (existing && (!existing.isFile() || existing.nlink > 1)) {
     throw new Error("Output path must be a regular, unshared file");
   }
-  const reader = loadInstitutionCases(inputRoot);
-  const lines: string[] = [];
+  const cases = loadInstitutionCases(inputRoot);
+  const results: CaseDecision[] = [];
+  const open: { index: number; pack: InstitutionCasePack; tasks: Task[] }[] = [];
+  const reader = options.reader === undefined ? defaultReader() : options.reader ?? undefined;
   let fallbacks = 0;
-  for (const id of reader.caseIds) {
+  // First pass: the deterministic decision for every case.
+  for (const id of cases.caseIds) {
     let result: CaseDecision;
     try {
-      const pack = reader.get(id);
+      const pack = cases.get(id);
       result = decideCase(pack);
       verify(pack, result);
+      const tasks = reader ? planTasks(pack, result) : [];
+      if (tasks.length) open.push({ index: results.length, pack, tasks });
     } catch (error) {
       // One bad case must not cost the whole institution: escalate it and carry on.
       warn(`${error instanceof Error ? error.message : String(error)}; escalating ${id}`);
-      result = fallbackDecision(reader.stub(id) ?? { case_id: id, alert_ids: [] });
+      result = fallbackDecision(cases.stub(id) ?? { case_id: id, alert_ids: [] });
       fallbacks++;
     }
-    lines.push(JSON.stringify(result));
+    results.push(result);
   }
-  if (fallbacks) warn(`${fallbacks} of ${lines.length} cases could not be assessed and were escalated`);
+  if (fallbacks) warn(`${fallbacks} of ${results.length} cases could not be assessed and were escalated`);
+  // Second pass, only with a key: read the documents no parser used, then decide those cases again with the checked facts.
+  if (reader && open.length) {
+    const answers = await readAll(open.flatMap(({ pack, tasks }) => tasks.map((task) => ({ task, customerName: pack.customer.name }))), reader);
+    let changed = 0;
+    for (const { index, pack, tasks } of open) {
+      try {
+        const findings = findingsFor(pack, tasks, answers);
+        if (!findings.explanations.length && !findings.signals.length) continue;
+        const revised = decideCase(pack, findings);
+        verify(pack, revised);
+        if (revised.verdict !== results[index].verdict || revised.reason_code !== results[index].reason_code) changed++;
+        results[index] = revised;
+      } catch (error) {
+        warn(`${pack.caseRecord.case_id}: fallback findings not used (${error instanceof Error ? error.message : String(error)})`);
+      }
+    }
+    warn(`fallback reader: ${open.length} cases had unread documents; ${changed} changed verdict or reason code; ${reader.summary()}`);
+  }
+  const lines = results.map((result) => JSON.stringify(result));
   // Build the full batch before touching the caller's output file.
   writeFileSync(canonical, lines.length ? `${lines.join("\n")}\n` : "", "utf8");
 }

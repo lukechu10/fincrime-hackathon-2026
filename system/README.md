@@ -22,11 +22,11 @@ Bad input does not stop the run:
   - its alert, transaction, customer or document cannot be joined or read;
   - deciding it throws an error or fails validation.
 - **Other cases are unaffected.**
-- **Exit codes:** the runner exits nonzero only for usage errors, an unreadable input folder, or an output path it refuses. Node.js 24+ is the only runtime requirement; no npm install, network, API key, or prior development run is required at evaluation time.
+- **Exit codes:** the runner exits nonzero only for usage errors, an unreadable input folder, or an output path it refuses. Node.js 24+ is the only runtime requirement; no npm install or prior development run is required at evaluation time. Network access and `OPENROUTER_API_KEY` are optional: without them the runner is fully offline (see [Optional model fallback](#optional-model-fallback)).
 
 ## How it decides
 
-The runner is deterministic and makes no model calls. It treats alerts as already raised; it does not rerun the upstream monitoring thresholds. The same code serves all four institutions, and institution differences come from the data and the SOP settings: thresholds in the alert measurements, the payments/FX held-payment release gate, and own-name funding being normal at payments/FX. Each case runs in four steps.
+The decision logic is deterministic. An optional language-model reader can add checked facts from documents no parser recognised (below), but it never decides a verdict. The runner treats alerts as already raised; it does not rerun the upstream monitoring thresholds. The same code serves all four institutions, and institution differences come from the data and the SOP settings: thresholds in the alert measurements, the payments/FX held-payment release gate, and own-name funding being normal at payments/FX. Each case runs in four steps.
 
 1. **Explain transactions** ([`explanations.ts`](src/explanations.ts)). Document-specific checks compare party names, exact amounts, dates, and account or reference details where applicable. An ordinary outgoing invoice must reconcile uniquely to one payment; a stated beneficiary or account must also match. Recognized document types:
    - Bank statements, including joint accounts and "Account … is held by" lines (`OWN_ACCOUNT`).
@@ -71,7 +71,33 @@ The runner is deterministic and makes no model calls. It treats alerts as alread
 
 Reasons name the decisive facts, amounts, counterparties and documents. Evidence lists only IDs that exist in the supplied files.
 
-**Model:** none. **Cost:** US$0 per run. **Measured runtime** on this machine with the bundled runner:
+## Optional model fallback
+
+When `OPENROUTER_API_KEY` is set, the runner adds a second pass ([`src/llm/`](src/llm/)) for documents written in wording the parsers do not recognise. Without the key, or if a call fails, the output is exactly the deterministic result.
+
+1. **Choose what to read.** After the deterministic pass, nothing is sent for escalated cases, because no new fact can override suspicion. For the rest:
+   - **RFI cases:** documents that could explain a payment and that no parser used: letters, receipts, contracts, invoices and ownership statements, but not identity, profile or register records. At most four per case.
+   - **RFI and CLOSE cases:** staff notes, support chats and customer emails dated in the review window, checked for statements of concern. At most three per case.
+2. **Read.** The model (`anthropic/claude-haiku-5.5` through OpenRouter chat completions, with a strict JSON schema) reports what the document literally says:
+   - **Payments:** each payment's direction, other party, amount actually paid, reference, due date, named recipient, purpose and status.
+   - **Ownership:** statements that one company owns all of another.
+   - **Concerns:** whether someone admits structuring, someone else uses the account, or the customer refused to explain a payment.
+
+   Every value comes with a verbatim quote. The document is treated as data, and instructions inside it are ignored.
+3. **Check.** A fact is dropped unless its quote appears word for word in the document and contains the value. A payment must be confirmed or scheduled, not conditional, denied or partial. A concern in a chat must be in the customer's own words; the agent's words do not count.
+4. **Match and decide again.** Checked facts go through the same literal matching rules as the parsers: exact pence, the same party (or that party's client account), the stated reference, the customer as recipient, and arrival within 60 days of the document. A refund also needs its unique original payment. A payment the customer makes needs an invoice- or contract-type document and an exact due date or reference. The case is then decided again by the unchanged deterministic logic, in which these facts only fill gaps the parsers left. Concerns become the existing structuring, account-misuse or (with a TM06 alert) high-risk-corridor signals.
+
+**Cost and time (estimated; not yet measured with a live key):**
+- **Development data (4,000 cases):** about 250 calls, all concern checks. No development payment document goes unread by the parsers.
+- **Estimate:** under US$0.10 for all 4,000 cases, so about US$0.01 for 200, plus about a minute of calls at eight in parallel.
+- **Limits:** a 45-second timeout per call, three attempts, and no new calls after 20 minutes.
+- **Logging:** stderr reports the number of calls, tokens and the cost OpenRouter returns.
+
+**Reproducibility:** this model does not accept a temperature setting. Repeat runs rely on the strict schema and on verbatim quote checks, so a different but valid wording of the same fact gives the same decision. Live runs still need checking across five repeats.
+
+**Dry run with ideal answers:** a hand-written script supplied correct answers for the synthetic documents. Correct synthetic verdicts went from 29 to 39 of 40, with no wrongful closes; the short gift letter in IV-06 stays an RFI. Early-redemption explanations (IV-01) are not covered by the fallback.
+
+**Model:** none offline; `anthropic/claude-haiku-5.5` when `OPENROUTER_API_KEY` is set. **Cost:** US$0 offline. **Measured offline runtime** on this machine with the bundled runner:
 - **200-case subsets** (bank, payments/FX): about 1.1 seconds each.
 - **Full 1,000-case files:** 1.6–3.5 seconds each.
 

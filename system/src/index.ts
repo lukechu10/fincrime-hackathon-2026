@@ -7,10 +7,8 @@ if (arguments_.length === 1 && ["--help", "-h"].includes(arguments_[0])) {
   console.error("Usage: system/run <institution-folder> <output-file>");
   process.exitCode = 2;
 } else {
-  try {
-    runSubmission(arguments_[0], arguments_[1]);
-  } catch (error) {
+  runSubmission(arguments_[0], arguments_[1]).catch((error: unknown) => {
     console.error(`run: ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;
-  }
+  });
 }
