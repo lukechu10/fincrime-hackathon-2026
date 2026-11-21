@@ -2,3 +2,8 @@
 {"doc_id":"SYN-EM-02-D01","customer_id":"SYN-EM-02-C","type":"bank_statement","title":"Statement from Juniper Mutual","dated":"2026-10-12","file":"evidence/SYN-EM-02-D01.md"}
 {"doc_id":"SYN-EM-02-D02","customer_id":"SYN-EM-02-C","type":"bank_statement","title":"Statement from Kestrel Basin Bank","dated":"2026-10-12","file":"evidence/SYN-EM-02-D02.md"}
 {"doc_id":"SYN-EM-04-D01","customer_id":"SYN-EM-04-C","type":"sending_bank_fraud_report","title":"Sending bank confirmation of unauthorised transfer","dated":"2026-10-16","file":"evidence/SYN-EM-04-D01.md"}
+{"doc_id":"SYN-EM-05-D01","customer_id":"SYN-EM-05-C","type":"takings_book","title":"Daily takings book","dated":"2026-10-11","file":"evidence/SYN-EM-05-D01.md"}
+{"doc_id":"SYN-EM-06-D01","customer_id":"SYN-EM-06-C","type":"support_chat","title":"Chat with the customer","dated":"2026-10-09","file":"evidence/SYN-EM-06-D01.md"}
+{"doc_id":"SYN-EM-08-D01","customer_id":"SYN-EM-08-C","type":"bank_statement","title":"Statement from Kestrel Basin Bank","dated":"2026-10-08","file":"evidence/SYN-EM-08-D01.md"}
+{"doc_id":"SYN-EM-09-D01","customer_id":"SYN-EM-09-C","type":"settlement_letter","title":"Settlement agreement letter from Ferncastle Logistics Ltd","dated":"2026-09-30","file":"evidence/SYN-EM-09-D01.md"}
+{"doc_id":"SYN-EM-10-D01","customer_id":"SYN-EM-10-C","type":"insurer_letter","title":"Claim settlement letter from Harrowgate Mutual Insurance plc","dated":"2026-10-09","file":"evidence/SYN-EM-10-D01.md"}

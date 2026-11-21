@@ -2,3 +2,9 @@
 {"doc_id":"SYN-PX-02-D01","customer_id":"SYN-PX-02-C","type":"supplier_invoice","title":"Invoice TUN-3112 from Sidra Conservatory Fixtures","dated":"2026-10-13","file":"evidence/SYN-PX-02-D01.md"}
 {"doc_id":"SYN-PX-04-D01","customer_id":"SYN-PX-04-C","type":"supplier_invoice","title":"Invoice TUN-3114 from Atlas Soundboard Works","dated":"2026-10-13","file":"evidence/SYN-PX-04-D01.md"}
 {"doc_id":"SYN-PX-04-D02","customer_id":"SYN-PX-04-C","type":"staff_note","title":"Supplier call-back on payment instructions","dated":"2026-10-17","file":"evidence/SYN-PX-04-D02.md"}
+{"doc_id":"SYN-PX-05-D01","customer_id":"SYN-PX-05-C","type":"supply_contract","title":"Contract CJ-0921 with Valdemar Holz GmbH","dated":"2026-09-15","file":"evidence/SYN-PX-05-D01.md"}
+{"doc_id":"SYN-PX-06-D01","customer_id":"SYN-PX-06-C","type":"bank_statement","title":"Statement from Juniper Mutual","dated":"2026-10-13","file":"evidence/SYN-PX-06-D01.md"}
+{"doc_id":"SYN-PX-07-D01","customer_id":"SYN-PX-07-C","type":"group_structure","title":"Group ownership confirmation","dated":"2026-06-30","file":"evidence/SYN-PX-07-D01.md"}
+{"doc_id":"SYN-PX-07-D02","customer_id":"SYN-PX-07-C","type":"invoice","title":"Invoice NV-20931 from Nordhavn Valves A/S","dated":"2026-09-28","file":"evidence/SYN-PX-07-D02.md"}
+{"doc_id":"SYN-PX-09-D01","customer_id":"SYN-PX-09-C","type":"invoice","title":"Invoice VG-7781 from Vitebsk Glaze OOO","dated":"2026-10-05","file":"evidence/SYN-PX-09-D01.md"}
+{"doc_id":"SYN-PX-10-D01","customer_id":"SYN-PX-10-C","type":"payment_file","title":"Contractor payment file","dated":"2026-10-12","file":"evidence/SYN-PX-10-D01.md"}
