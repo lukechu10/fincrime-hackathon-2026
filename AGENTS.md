@@ -4,7 +4,7 @@
 
 Build an evidence-first transaction-monitoring triage system for [Track 1: Stop suspicious payments](https://gb-fincrime-hackathon-11-2026.teamdeel.workers.dev/hackathon#track-1). The system plays the analyst: it reviews cases raised by existing monitoring rules, not a feed of raw transactions that it must flag from scratch. It recommends a disposition; it does not actually release payments, contact customers, or file reports. Escalations go to the Money Laundering Reporting Officer (MLRO), who decides whether to file a Suspicious Activity Report.
 
-Read the [full track brief](https://hosted-pages.godiligent.ai/hackathon-tm-track/) and the data bundle's README and four `POLICY.md` files before implementing decision logic. This file summarizes the brief; it is not a replacement for the institution-specific SOPs. The repository currently has only a Node.js 24+ / TypeScript scaffold (`src/index.ts`, strict TypeScript with NodeNext/ESM). The dataset and SOPs have not been added, and the submission runner and decision engine are not implemented yet.
+Read the [full track brief](https://hosted-pages.godiligent.ai/hackathon-tm-track/) and the data bundle's README and four `POLICY.md` files before implementing decision logic. This file summarizes the brief; it is not a replacement for the institution-specific SOPs. The repository currently has only a Node.js 24+ / TypeScript scaffold (`src/index.ts`, strict TypeScript with NodeNext/ESM). The official development bundle is extracted locally under `data/track-1/` (ignored by Git); see the project README for the download link. The submission runner and decision engine are not implemented yet.
 
 ```sh
 npm ci
@@ -19,19 +19,19 @@ npm start          # run the compiled entry point
 Deliver `system/run` (executable), `system/README.md` (how to run it and how it decides), and four development output files: `output/bank.jsonl`, `output/emoney.jsonl`, `output/investment.jsonl`, and `output/payments_fx.jsonl`.
 
 ```sh
-system/run institutions/bank output/bank.jsonl
+system/run data/track-1/institutions/bank output/bank.jsonl
 # Evaluators also run from inside system/:
 ./run /absolute/path/to/bank /absolute/path/to/bank.jsonl
 ```
 
-- The runner takes exactly two positional arguments: an institution folder and an output file. Resolve relative arguments against the caller's working directory; locate the runner's own code relative to the wrapper, not the caller. A submission must not need to build or install dependencies at evaluation time. Document how to prepare it beforehand.
-- Read case data only from the supplied institution folder, and write only the requested output file. Keep diagnostics out of JSONL (use stderr). Don't rely on `.env`, network services, another institution's data, or development outputs at evaluation time. Keep `.env` untouched and out of Git.
+- The runner takes exactly two positional arguments: an institution folder and an output file. Resolve relative arguments against the caller's working directory; locate the runner's own code relative to the wrapper, not the caller. A submission must not need to build or install dependencies at evaluation time. Use only the Node.js standard library and shell for the submitted runtime; TypeScript and other development dependencies are build-time only. Document how to prepare it beforehand.
+- Read case data only from the supplied institution folder, and write only the requested output file. Keep diagnostics out of JSONL (use stderr). Don't rely on `.env`, another institution's data, or development outputs at evaluation time. Keep `.env` untouched and out of Git. Our default is an offline runner. The bundle README allows model calls only via OpenRouter chat completions, using `OPENROUTER_API_KEY` supplied by the evaluator; the 200-case run should cost under about US$4. The submission README should report the runtime and cost for 200 cases and identify any model used.
 - The organizers test on 800 unseen cases (200 per institution) in the same format and under the same policies. They run the system five times. A 200-case run must finish within 30 minutes.
 - Never embed development case IDs, names, amounts, or case-specific lookup tables in the decision logic. Policy thresholds and artificial test fixtures are fine. A missing case counts as an escalation; don't silently drop cases or invent evidence to fill gaps.
 
 ### Inputs
 
-The development bundle contains `README.md`, `BRIEF.html`, and `institutions/{bank,emoney,investment,payments_fx}/`. There are 4,000 development cases, 1,000 per institution, **without answer labels**. Each institution folder contains:
+Under `data/track-1/`, the development bundle contains `README.md`, `BRIEF.html`, and `institutions/{bank,emoney,investment,payments_fx}/`. There are 4,000 development cases, 1,000 per institution, **without answer labels**. Each institution folder contains:
 
 | Input | Contents |
 | --- | --- |
@@ -126,7 +126,7 @@ Bank: current accounts with transfers, cards, branch/ATM cash. Payments/FX: busi
 
 ## Implementation plan
 
-1. **SOPs and CLI first.** Obtain the bundle, read all four SOPs, and record how their thresholds, case scope, exceptions, and naming differ. Build a fixture-backed vertical slice with strict input/output validation and the required runner invocation. Make missing files, malformed JSONL, and broken references diagnosable; never silently treat a failed load as an empty evidence pack.
+1. **SOPs and CLI first.** Read all four SOPs from the local bundle and record how their thresholds, case scope, exceptions, and naming differ. Build a fixture-backed vertical slice with strict input/output validation and the required runner invocation. Make missing files, malformed JSONL, and broken references diagnosable; never silently treat a failed load as an empty evidence pack.
 2. **Evidence assembly.** Index records once per institution; assemble each case by joining its alerts to implicated transactions and relevant customer and counterparty records. Extract structured evidence with provenance: party/account ownership, identities and control, dates, amounts, payment purpose, and scope of prior reviews. Separate observed facts, document claims, and inferences; retain contradictions. Read document bodies, not just their titles or file names.
 3. **Policy and alert findings.** Keep institution settings explicit and share code only where rules really agree. Normalize currencies, dates and parties without losing source values; prefer integer minor units or exact decimals for money comparisons. Produce structured per-alert findings (support, suspicion, unresolved gap, source IDs), then apply case-level precedence. Start with internal-list matching, own-account proof, prior-review scope, and held-payment release checks.
 4. **Decision and explanation.** Derive verdict, main reason code, cited evidence, and reason text from the same findings. Use stable ordering and tie-breakers rather than filesystem order, randomness, or current time. Prefer deterministic document extraction and templating; if extraction needs a model, treat it as an untrusted fact extractor, validate facts against the documents, and keep final policy logic deterministic. Do not depend on external or variable model calls in the submitted runner.
