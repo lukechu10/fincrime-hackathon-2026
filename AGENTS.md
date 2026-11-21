@@ -4,16 +4,14 @@
 
 Build an evidence-first transaction-monitoring triage system for [Track 1: Stop suspicious payments](https://gb-fincrime-hackathon-11-2026.teamdeel.workers.dev/hackathon#track-1). The system plays the analyst: it reviews cases raised by existing monitoring rules, not a feed of raw transactions that it must flag from scratch. It recommends a disposition; it does not actually release payments, contact customers, or file reports. Escalations go to the Money Laundering Reporting Officer (MLRO), who decides whether to file a Suspicious Activity Report.
 
-Read the [full track brief](https://hosted-pages.godiligent.ai/hackathon-tm-track/), `DATASET.md`, and the four `institutions/*/POLICY.md` files before implementing decision logic. This file summarizes the brief; it is not a replacement for the institution-specific SOPs. The project uses Node.js 24+ and strict TypeScript with NodeNext/ESM. `system/src/index.ts` is a placeholder. `system/src/evidence.ts` indexes evidence metadata and lazily loads and extracts relevant Markdown with source provenance. Run `make dataset` to fetch the bundle to the repository root (`institutions/`, `DATASET.md`, and `BRIEF.html`, all ignored by Git). Keep submission code under `system/` and generated verdicts under `output/`. The submission runner and decision engine are not implemented yet.
+Read the [full track brief](https://hosted-pages.godiligent.ai/hackathon-tm-track/), `DATASET.md`, and the four `institutions/*/POLICY.md` files before implementing decision logic. This file summarizes the brief; it is not a replacement for the institution-specific SOPs. The project uses Node.js 24+ and strict TypeScript with NodeNext/ESM. `system/src/index.ts` is the CLI entry point; `system/src/decision.ts` implements an offline baseline, with limitations documented in `system/README.md`. `system/src/evidence.ts` loads Markdown and extracts supported facts with source provenance. Run `make dataset` to fetch the bundle to the repository root (`institutions/`, `DATASET.md`, and `BRIEF.html`, all ignored by Git). Keep submission code under `system/`, and regenerate all four verdict files under `output/` after changing the decision logic.
 
 ```sh
 cd system
 npm ci
-npm run dev        # watch and run src/index.ts
 npm run typecheck  # no emitted files
-npm test           # evidence fixtures
-npm run build      # compile into system/dist/ (relative to the repo root)
-npm start          # run the compiled entry point
+npm test           # extraction, routing and submission fixtures
+npm run build:run  # bundle the self-contained system/run executable
 ```
 
 ## Submission contract

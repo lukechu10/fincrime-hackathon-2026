@@ -1,4 +1,1017 @@
 #!/usr/bin/env node
 
+// src/submission.ts
+import { lstatSync, realpathSync as realpathSync3, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute as isAbsolute3, join as join2, relative as relative3, resolve as resolve2, sep as sep3 } from "node:path";
+
+// src/bank-cases.ts
+import { readFileSync as readFileSync2, realpathSync as realpathSync2 } from "node:fs";
+import { isAbsolute as isAbsolute2, join, relative as relative2, sep as sep2 } from "node:path";
+
+// src/evidence.ts
+import { readFileSync, realpathSync } from "node:fs";
+import { isAbsolute, relative, resolve, sep } from "node:path";
+
+// src/evidence-extraction.ts
+var invoiceFields = {
+  "bill to": "billedTo",
+  buyer: "buyer",
+  customer: "customer",
+  patient: "patient",
+  supplier: "supplier",
+  carrier: "carrier",
+  description: "description",
+  goods: "goods",
+  service: "service",
+  treatment: "treatment",
+  vehicle: "vehicle",
+  terms: "terms"
+};
+var statementFields = {
+  "account holder": "accountHolder",
+  "account holders": "accountHolders",
+  "account name": "accountName",
+  bank: "bank",
+  account: "account"
+};
+var companyFields = {
+  company: "company",
+  "company number": "companyNumber",
+  "registered office": "registeredOffice",
+  "nature of business": "natureOfBusiness",
+  status: "companyStatus"
+};
+var invoiceAmounts = {
+  "amount due": "amountDue",
+  amount: "amount",
+  total: "total",
+  price: "price",
+  "paid by bank transfer": "amountPaidByTransfer"
+};
+var invoiceTypes = /* @__PURE__ */ new Set([
+  "invoice",
+  "dealer_invoice",
+  "hospital_invoice",
+  "supplier_invoice",
+  "supplier_invoices",
+  "carrier_invoice",
+  "freight_invoices"
+]);
+var registerTypes = /* @__PURE__ */ new Set(["company_register_extract", "significant_control_register"]);
+var months = "January February March April May June July August September October November December".split(" ");
+var gbpNumber = String.raw`(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{2})?`;
+function parseGbp(text2) {
+  const match = new RegExp(`^\xA3\\s*(${gbpNumber})$`).exec(text2);
+  if (!match) return;
+  const [pounds, pence = "00"] = match[1].replaceAll(",", "").split(".");
+  const minorUnits = Number(pounds + pence);
+  if (Number.isSafeInteger(minorUnits)) return { currency: "GBP", minorUnits };
+}
+function parseDate(text2) {
+  const named = /^(\d{1,2}) ([A-Za-z]+) (\d{4})$/.exec(text2);
+  let normalized = text2;
+  if (named) {
+    const [, day, name, year] = named;
+    const month = months.findIndex((m) => m.toLowerCase() === name.toLowerCase()) + 1;
+    if (!month) return;
+    normalized = `${year}-${String(month).padStart(2, "0")}-${day.padStart(2, "0")}`;
+  } else if (!/^\d{4}-\d{2}-\d{2}$/.test(text2)) {
+    return;
+  }
+  const date = /* @__PURE__ */ new Date(`${normalized}T00:00:00Z`);
+  if (Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === normalized) return normalized;
+}
+function textFact(out, field, value, source) {
+  if (value && value !== "\u2014" && value !== "-") out.push({ field, value, source });
+}
+function dateFact(out, field, value, source) {
+  textFact(out, field, value && parseDate(value), source);
+}
+function amountFact(out, field, value, source) {
+  const normalized = value && parseGbp(value);
+  if (normalized) out.push({ field, value: normalized, source });
+}
+function lookup(map, key) {
+  return Object.hasOwn(map, key) ? map[key] : void 0;
+}
+function tableEntry(kind, cells, headers, source) {
+  if (cells.length !== headers.length) return;
+  const get = (label2) => cells[headers.indexOf(label2)];
+  const facts = [];
+  if (kind === "invoice" && headers.includes("invoice") && headers.includes("amount")) {
+    textFact(facts, "invoiceNumber", get("invoice"), source);
+    dateFact(facts, "invoiceDate", get("dated"), source);
+    textFact(facts, "goods", get("goods"), source);
+    textFact(facts, "exporter", get("exporter"), source);
+    amountFact(facts, "amount", get("amount"), source);
+    return { kind: "invoiceLine", facts };
+  }
+  if (kind !== "companyRegister") return;
+  const isOfficer = headers.includes("officer") && headers.includes("role");
+  const isControl = headers.includes("control") && (headers.includes("person") || headers.includes("person with significant control"));
+  if (!isOfficer && !isControl) return;
+  textFact(facts, "person", get("officer") ?? get("person with significant control") ?? get("person"), source);
+  textFact(facts, "role", get("role"), source);
+  textFact(facts, "birthDetail", get("born"), source);
+  textFact(facts, "control", get("control"), source);
+  dateFact(facts, "appointedDate", get("appointed"), source);
+  dateFact(facts, "resignedDate", get("resigned"), source);
+  dateFact(facts, "notifiedDate", get("notified"), source);
+  dateFact(facts, "ceasedDate", get("ceased"), source);
+  return { kind: isOfficer ? "companyOfficer" : "significantControl", facts };
+}
+function invoicePayTo(facts, value, source) {
+  const account = /^(.*?),\s*(account\s+.+|IBAN\s+.+)$/i.exec(value);
+  if (account) {
+    textFact(facts, "payee", account[1], source);
+    textFact(facts, "paymentDestination", account[2], source);
+  } else if (/^(IBAN|account)\b/i.test(value)) {
+    textFact(facts, "paymentDestination", value, source);
+  } else {
+    textFact(facts, "payee", value, source);
+  }
+}
+function extractEvidence(docId, type, markdown) {
+  const kind = invoiceTypes.has(type) ? "invoice" : type === "bank_statement" ? "bankStatement" : registerTypes.has(type) ? "companyRegister" : "unparsed";
+  const facts = [];
+  const entries = [];
+  if (kind === "unparsed") return { kind, facts, entries };
+  const movementAmount = new RegExp(`^(?:transfer of\\s+|received\\s+)?(\xA3\\s*${gbpNumber})(?=\\s|$)`, "i");
+  let headers;
+  const lines = markdown.split(/\r?\n/);
+  for (const [i, excerpt] of lines.entries()) {
+    const line = excerpt.trim();
+    const source = { docId, line: i + 1, excerpt };
+    if (line.startsWith("|") && line.endsWith("|")) {
+      const cells = line.slice(1, -1).split(/(?<!\\)\|/).map((cell) => cell.trim().replaceAll("\\|", "|"));
+      const separator = lines[i + 1]?.trim();
+      if (separator && /^\|(?:\s*:?-{3,}:?\s*\|)+$/.test(separator)) {
+        headers = cells.map((cell) => cell.toLowerCase());
+      } else if (headers && !/^\|(?:\s*:?-{3,}:?\s*\|)+$/.test(line)) {
+        const entry = tableEntry(kind, cells, headers, source);
+        if (entry?.facts.length) entries.push(entry);
+      }
+      continue;
+    }
+    headers = void 0;
+    const heading = /^#\s+(.+)$/.exec(line);
+    if (heading) textFact(facts, "title", heading[1], source);
+    const field = /^\*\*([^*]+):\*\*\s*(.+)$/.exec(line);
+    if (field) {
+      const label2 = field[1].toLowerCase();
+      const value = field[2];
+      if (label2 === "dated") dateFact(facts, "documentDate", value, source);
+      if (kind === "invoice") {
+        const textKey = lookup(invoiceFields, label2);
+        const amountKey = lookup(invoiceAmounts, label2);
+        if (textKey) textFact(facts, textKey, value, source);
+        if (amountKey) amountFact(facts, amountKey, value, source);
+        if (label2 === "pay to") invoicePayTo(facts, value, source);
+      } else if (kind === "bankStatement") {
+        const key = lookup(statementFields, label2);
+        if (key) textFact(facts, key, value, source);
+      } else {
+        const key = lookup(companyFields, label2);
+        if (key) textFact(facts, key, value, source);
+        if (label2 === "incorporated") dateFact(facts, "incorporationDate", value, source);
+        if (label2 === "status" && /^dissolved on /i.test(value)) {
+          dateFact(facts, "dissolutionDate", value.slice("dissolved on ".length), source);
+        }
+      }
+    } else if (kind === "bankStatement") {
+      const movement = /^([^:]+):\s+(.+)$/.exec(line);
+      if (!movement) continue;
+      const date = parseDate(movement[1]);
+      const amount = movementAmount.exec(movement[2]);
+      if (!date || !amount) continue;
+      const movementFacts = [];
+      textFact(movementFacts, "movementDate", date, source);
+      amountFact(movementFacts, "amount", amount[1], source);
+      textFact(movementFacts, "movementDetails", movement[2], source);
+      entries.push({ kind: "statementMovement", facts: movementFacts });
+    }
+  }
+  return { kind, facts, entries };
+}
+
+// src/evidence.ts
+function isMetadata(value) {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value;
+  return ["doc_id", "customer_id", "type", "title", "dated", "file"].every((key) => {
+    const field = row[key];
+    return typeof field === "string" && field.trim().length > 0;
+  });
+}
+function within(base, file) {
+  const rel = relative(base, file);
+  return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+}
+function loadEvidenceIndex(institutionDir) {
+  const root = realpathSync(institutionDir);
+  const indexFile = realpathSync(resolve(root, "evidence.jsonl"));
+  if (!within(root, indexFile)) throw new Error("evidence.jsonl resolves outside the institution directory");
+  const evidenceDir = resolve(root, "evidence");
+  const rows = /* @__PURE__ */ new Map();
+  const customers = /* @__PURE__ */ new Map();
+  const cache = /* @__PURE__ */ new Map();
+  for (const [i, line] of readFileSync(indexFile, "utf8").split(/\r?\n/).entries()) {
+    if (!line.trim()) continue;
+    const location = `${indexFile}:${i + 1}`;
+    let row;
+    try {
+      row = JSON.parse(line);
+    } catch (error) {
+      throw new Error(`${location}: invalid JSON`, { cause: error });
+    }
+    if (!isMetadata(row)) throw new Error(`${location}: invalid evidence metadata`);
+    if (rows.has(row.doc_id)) throw new Error(`${location}: duplicate evidence ID ${row.doc_id}`);
+    if (isAbsolute(row.file) || !row.file.endsWith(".md") || !within(evidenceDir, resolve(root, row.file))) {
+      throw new Error(`${location}: expected a relative Markdown path under evidence/ for ${row.doc_id}`);
+    }
+    rows.set(row.doc_id, row);
+    const documents = customers.get(row.customer_id) ?? [];
+    documents.push(row);
+    customers.set(row.customer_id, documents);
+  }
+  function load(row) {
+    const existing = cache.get(row.doc_id);
+    if (existing) return existing;
+    let markdown;
+    try {
+      const file = realpathSync(resolve(root, row.file));
+      if (!within(evidenceDir, file)) throw new Error("document resolves outside the evidence directory");
+      markdown = readFileSync(file, "utf8");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Cannot read evidence ${row.doc_id} (${row.file}): ${message}`, { cause: error });
+    }
+    const document = { metadata: row, markdown, extraction: extractEvidence(row.doc_id, row.type, markdown) };
+    cache.set(row.doc_id, document);
+    return document;
+  }
+  return {
+    metadataForCustomer: (customerId) => [...customers.get(customerId) ?? []],
+    get: (docId) => {
+      const row = rows.get(docId);
+      return row && load(row);
+    },
+    documentsForCustomer: (customerId) => (customers.get(customerId) ?? []).map(load)
+  };
+}
+
+// src/bank-cases.ts
+var institutions = ["bank", "emoney", "investment", "payments_fx"];
+var isRow = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var text = (value) => typeof value === "string" && value.trim().length > 0;
+var ids = (value) => Array.isArray(value) && value.every(text) && new Set(value).size === value.length;
+var nullableText = (value) => value === null || text(value);
+function isDay(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = /* @__PURE__ */ new Date(`${value}T00:00:00Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+function bankCase(row) {
+  const w = row.review_window;
+  return text(row.case_id) && text(row.customer_id) && institutions.some((value) => value === row.institution) && ids(row.alert_ids) && (row.held_payment_id === void 0 || nullableText(row.held_payment_id)) && isRow(w) && isDay(w.from) && isDay(w.to) && w.from <= w.to;
+}
+function bankAlert(row) {
+  return text(row.alert_id) && text(row.case_id) && text(row.customer_id) && text(row.rule_id) && ids(row.transaction_ids);
+}
+function bankTransaction(row) {
+  return text(row.transaction_id) && text(row.customer_id) && text(row.booked_at) && isDay(row.booked_at.slice(0, 10)) && Number.isFinite(Date.parse(row.booked_at)) && (row.direction === "in" || row.direction === "out") && typeof row.amount_gbp === "number" && Number.isFinite(row.amount_gbp) && row.amount_gbp >= 0 && nullableText(row.counterparty_name) && nullableText(row.counterparty_account);
+}
+function bankCustomer(row) {
+  return text(row.customer_id) && text(row.name);
+}
+function indexRows(path, valid, idKey) {
+  const result = /* @__PURE__ */ new Map();
+  for (const [i, line] of readFileSync2(path, "utf8").split(/\r?\n/).entries()) {
+    if (!line.trim()) continue;
+    let row;
+    try {
+      row = JSON.parse(line);
+    } catch (cause) {
+      throw new Error(`${path}:${i + 1}: invalid JSON`, { cause });
+    }
+    if (!isRow(row) || !valid(row)) throw new Error(`${path}:${i + 1}: invalid row`);
+    const id = row[idKey];
+    if (result.has(id)) throw new Error(`${path}:${i + 1}: duplicate ID ${String(id)}`);
+    result.set(id, row);
+  }
+  return result;
+}
+function listEntry(row) {
+  return text(row.entry_id) && text(row.name);
+}
+function previousReview(row) {
+  return text(row.review_id) && text(row.customer_id) && typeof row.note === "string";
+}
+function groupByCustomer(rows) {
+  const groups = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    const group = groups.get(row.customer_id);
+    if (group) group.push(row);
+    else groups.set(row.customer_id, [row]);
+  }
+  return groups;
+}
+function loadCases(directory, bankDiagnostic) {
+  const root = realpathSync2(directory);
+  function input(name) {
+    const path = realpathSync2(join(root, name));
+    const sub = relative2(root, path);
+    if (!sub || sub === ".." || sub.startsWith(`..${sep2}`) || isAbsolute2(sub)) {
+      throw new Error(`${name} resolves outside the institution directory`);
+    }
+    return path;
+  }
+  const cases = indexRows(input("cases.jsonl"), bankCase, "case_id");
+  const alerts = indexRows(input("alerts.jsonl"), bankAlert, "alert_id");
+  const transactions = indexRows(input("transactions.jsonl"), bankTransaction, "transaction_id");
+  const customers = indexRows(input("customers.jsonl"), bankCustomer, "customer_id");
+  const evidence = loadEvidenceIndex(root);
+  const caseInstitutions = new Set([...cases.values()].map((record3) => record3.institution));
+  if (caseInstitutions.size > 1 || bankDiagnostic && [...caseInstitutions].some((value) => value !== "bank")) {
+    throw new Error(bankDiagnostic ? "Expected Bank case records" : "Input folder mixes institutions");
+  }
+  const txByCustomer = groupByCustomer(transactions.values());
+  const internalList = bankDiagnostic ? [] : [...indexRows(input("internal_list.jsonl"), listEntry, "entry_id").values()];
+  const reviewsByCustomer = groupByCustomer(bankDiagnostic ? [] : indexRows(input("previous_reviews.jsonl"), previousReview, "review_id").values());
+  function get(caseId) {
+    const caseRecord = cases.get(caseId);
+    if (!caseRecord) throw new Error(`Unknown Bank case ${caseId}`);
+    const customer = customers.get(caseRecord.customer_id);
+    if (!customer) throw new Error(`${caseId}: missing customer ${caseRecord.customer_id}`);
+    const flagged = /* @__PURE__ */ new Map();
+    const caseAlerts = caseRecord.alert_ids.map((id) => {
+      const alert = alerts.get(id);
+      if (!alert || alert.case_id !== caseId || alert.customer_id !== customer.customer_id) {
+        throw new Error(`${caseId}: missing or unrelated alert ${id}`);
+      }
+      for (const transactionId of alert.transaction_ids) {
+        const tx = transactions.get(transactionId);
+        if (!tx || tx.customer_id !== customer.customer_id) {
+          throw new Error(`${caseId}: alert ${id} refers to missing or unrelated transaction ${transactionId}`);
+        }
+        flagged.set(transactionId, tx);
+      }
+      return alert;
+    });
+    const heldPayment = caseRecord.held_payment_id ? transactions.get(caseRecord.held_payment_id) : void 0;
+    if (caseRecord.held_payment_id && (!heldPayment || heldPayment.customer_id !== customer.customer_id || heldPayment.direction !== "out")) {
+      throw new Error(`${caseId}: missing or unrelated held payment ${caseRecord.held_payment_id}`);
+    }
+    const { from, to } = caseRecord.review_window;
+    const windowTransactions = (txByCustomer.get(customer.customer_id) ?? []).filter((tx) => {
+      const day = tx.booked_at.slice(0, 10);
+      return day >= from && day <= to;
+    });
+    return {
+      caseRecord,
+      customer,
+      alerts: caseAlerts,
+      flaggedTransactions: [...flagged.values()],
+      documents: evidence.documentsForCustomer(customer.customer_id),
+      windowTransactions,
+      heldPayment,
+      previousReviews: reviewsByCustomer.get(customer.customer_id) ?? [],
+      internalList
+    };
+  }
+  return { root, caseIds: [...cases.keys()], get };
+}
+function loadInstitutionCases(directory) {
+  return loadCases(directory, false);
+}
+
+// src/list-assessment.ts
+function record(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+}
+function normalizedName(value) {
+  return value.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\bpublic\s+limited\s+company\b/g, "plc").replace(/\blimited\b/g, "ltd").replace(/[^a-z0-9]/g, "");
+}
+function monthYear(value) {
+  if (typeof value !== "string") return;
+  const text2 = value.trim();
+  let match = /^(\d{4})-(\d{2})(?:-\d{2})?$/.exec(text2);
+  if (match && Number(match[2]) >= 1 && Number(match[2]) <= 12) return `${match[1]}-${match[2]}`;
+  match = /^(?:\d{1,2}\s+)?([A-Za-z]+)\s+(\d{4})$/.exec(text2);
+  if (!match) return;
+  const months2 = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+  const index = months2.indexOf(match[1].toLowerCase());
+  return index < 0 ? void 0 : `${match[2]}-${String(index + 1).padStart(2, "0")}`;
+}
+function textFacts(facts, field) {
+  return facts.filter((fact) => fact.field === field && typeof fact.value === "string").map((fact) => fact.value);
+}
+function factIn(entry, field) {
+  return textFacts(entry.facts, field);
+}
+function hasActiveRole(entry, doc) {
+  const endField = entry.kind === "companyOfficer" ? "resignedDate" : "ceasedDate";
+  const endDates = factIn(entry, endField);
+  return endDates.length === 0 || endDates.some((date) => date > doc.metadata.dated);
+}
+function companyName(doc) {
+  const extracted = textFacts(doc.extraction.facts, "company").find((value) => value.trim());
+  if (extracted) return extracted;
+  const title = doc.metadata.title.trim();
+  const fromTitle = /^(?:company register extract for|register of people with significant control for)\s+(.+?)\s*$/i.exec(title);
+  return fromTitle?.[1].replace(/:\s*(?:officers|directors)\s*$/i, "").trim();
+}
+function relevantRegister(doc, counterparties) {
+  if (doc.extraction.kind !== "companyRegister") return false;
+  const name = companyName(doc);
+  return !!name && counterparties.has(normalizedName(name));
+}
+function identifierValue(value) {
+  if (typeof value !== "string" && typeof value !== "number") return;
+  const normalized = String(value).toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return normalized || void 0;
+}
+function companyIdentifierKeys(entry) {
+  const identifiers = record(entry.identifiers);
+  if (!identifiers) return [];
+  return Object.keys(identifiers).filter((key) => {
+    const normalizedKey = key.toLowerCase().replace(/[^a-z]/g, "");
+    return ["companynumber", "companyregistrationnumber", "registrationnumber"].includes(normalizedKey);
+  });
+}
+function hasCompanyIdentifierMatch(entry, doc) {
+  const identifiers = record(entry.identifiers);
+  if (!identifiers) return false;
+  const companyNumber = textFacts(doc.extraction.facts, "companyNumber");
+  if (!companyNumber.length) return false;
+  for (const [key, value] of Object.entries(identifiers)) {
+    const normalizedKey = key.toLowerCase().replace(/[^a-z]/g, "");
+    if (!["companynumber", "companyregistrationnumber", "registrationnumber"].includes(normalizedKey)) continue;
+    const listed = identifierValue(value);
+    if (listed && companyNumber.some((number) => identifierValue(number) === listed)) return true;
+  }
+  return false;
+}
+function assessListMatch(alert, entries, documents, counterpartyNames) {
+  const measured = record(alert.measured);
+  const selectedId = measured?.list_entry;
+  if (typeof selectedId !== "string" || !selectedId.trim()) {
+    return { status: "unresolved", evidence: [], detail: "The alert does not identify a usable measured.list_entry, so no list entry can be assessed." };
+  }
+  const listed = entries.find((entry) => entry.entry_id === selectedId);
+  if (!listed) {
+    return { status: "unresolved", evidence: [], detail: `The alert selects list entry ${selectedId}, but that entry is not present in the supplied list.` };
+  }
+  const baseEvidence = [listed.entry_id];
+  const counterpartySet = new Set(counterpartyNames.filter((name) => typeof name === "string").map(normalizedName));
+  const registers = documents.filter((doc) => relevantRegister(doc, counterpartySet));
+  if (companyIdentifierKeys(listed).length > 0) {
+    const matchingDocs = registers.filter((doc) => hasCompanyIdentifierMatch(listed, doc));
+    if (matchingDocs.length === 1) {
+      const doc = matchingDocs[0];
+      return {
+        status: "confirmed",
+        evidence: [...baseEvidence, doc.metadata.doc_id],
+        detail: `The alert-selected entry ${listed.name} is corroborated by the same unique company number in the parsed register for the named counterparty; this is more than a name or premises match.`
+      };
+    }
+    if (matchingDocs.length > 1) {
+      return { status: "unresolved", evidence: baseEvidence, detail: `More than one parsed register document appears to match the unique company identifier for ${listed.name}, so the business identity is not resolved.` };
+    }
+    const inspectedDocs = registers.map((doc) => doc.metadata.doc_id);
+    return {
+      status: "unresolved",
+      evidence: [...baseEvidence, ...inspectedDocs],
+      detail: `The selected entry ${listed.name} supplies a company identifier, but the parsed register evidence does not verify that identifier for a named counterparty; a name or premises resemblance alone is not conclusive.`
+    };
+  }
+  const listedName = normalizedName(listed.name);
+  const listedBirth = monthYear(listed.date_of_birth);
+  const relevantRows = [];
+  for (const doc of registers) {
+    for (const row of doc.extraction.entries) {
+      if (row.kind !== "companyOfficer" && row.kind !== "significantControl") continue;
+      const person = factIn(row, "person").find((value) => normalizedName(value) === listedName);
+      if (!person) continue;
+      const born = factIn(row, "birthDetail");
+      relevantRows.push({ doc, entry: row, person, born, active: hasActiveRole(row, doc) });
+    }
+  }
+  const identityRows = relevantRows.filter((row) => row.active && row.born.length > 0);
+  const corroborating = identityRows.filter((row) => {
+    const registerBirth = row.born.map(monthYear).filter((value) => !!value);
+    return listedBirth !== void 0 && registerBirth.includes(listedBirth);
+  });
+  const conflicting = identityRows.filter((row) => {
+    const registerBirth = row.born.map(monthYear).filter((value) => !!value);
+    return listedBirth !== void 0 && registerBirth.length > 0 && registerBirth.every((value) => value !== listedBirth);
+  });
+  if (corroborating.length > 0 && conflicting.length > 0) {
+    return {
+      status: "unresolved",
+      evidence: baseEvidence,
+      detail: `Parsed registers for the counterparty give conflicting month-and-year-of-birth evidence for ${listed.name}; the identity cannot safely be resolved.`
+    };
+  }
+  if (corroborating.length > 0) {
+    const docs = [...new Set(corroborating.map((row) => row.doc.metadata.doc_id))];
+    return {
+      status: "confirmed",
+      evidence: [...baseEvidence, ...docs],
+      detail: `The parsed register for the named counterparty records ${listed.name} with a month and year of birth matching the selected list entry, and shows an active officer role or significant control in the register snapshot. This independently corroborates the match.`
+    };
+  }
+  if (conflicting.length > 0) {
+    const docs = [...new Set(conflicting.map((row) => row.doc.metadata.doc_id))];
+    return {
+      status: "different",
+      evidence: [...baseEvidence, ...docs],
+      detail: `The parsed register for the named counterparty records an active role or significant control for ${listed.name}, but its month and year of birth conflicts with the selected list entry; the shared name is therefore not enough to identify the listed person.`
+    };
+  }
+  const matchedOn = measured?.matched_on;
+  const listedUnit = typeof listed.address === "string" ? /^unit\s+([a-z0-9-]+)\s*,?\s+(.+)/i.exec(listed.address.trim()) : null;
+  if (typeof matchedOn === "string" && /^registered address\b/i.test(matchedOn) && listedUnit && !relevantRows.length) {
+    for (const doc of registers) {
+      const office = textFacts(doc.extraction.facts, "registeredOffice");
+      if (office.length !== 1) continue;
+      const unit = /^unit\s+([a-z0-9-]+)\s*,?\s+(.+)/i.exec(office[0]);
+      if (!unit || unit[1].toLowerCase() === listedUnit[1].toLowerCase() || normalizedName(unit[2]) !== normalizedName(listedUnit[2])) continue;
+      const controllingOwner = doc.extraction.entries.find((row) => row.kind === "significantControl" && hasActiveRole(row, doc) && factIn(row, "person").some((name) => normalizedName(name) !== listedName) && factIn(row, "control").some((description) => /\b75% or more of (?:the )?shares\b/i.test(description)));
+      if (!controllingOwner) continue;
+      const controller = factIn(controllingOwner, "person")[0];
+      return {
+        status: "different",
+        evidence: [...baseEvidence, doc.metadata.doc_id],
+        detail: `Register ${doc.metadata.doc_id} locates ${companyName(doc)} at Unit ${unit[1]}, not the listed Unit ${listedUnit[1]}, and records ${controller} as holding at least 75% of its shares`
+      };
+    }
+  }
+  if (relevantRows.length > 0 && !listedBirth) {
+    const docs = [...new Set(relevantRows.map((row) => row.doc.metadata.doc_id))];
+    return {
+      status: "unresolved",
+      evidence: [...baseEvidence, ...docs],
+      detail: `A parsed register for the named counterparty contains ${listed.name}, but the selected list entry has no usable date of birth for comparison; name and role alone do not establish identity.`
+    };
+  }
+  if (relevantRows.length > 0) {
+    const docs = [...new Set(relevantRows.map((row) => row.doc.metadata.doc_id))];
+    return {
+      status: "unresolved",
+      evidence: [...baseEvidence, ...docs],
+      detail: `A parsed register for the named counterparty contains ${listed.name}, but it does not establish a matching birth month and year in an active role or control record; the list match remains undecided.`
+    };
+  }
+  return {
+    status: "unresolved",
+    evidence: baseEvidence,
+    detail: `The selected list entry is ${listed.name}. The supplied parsed register evidence does not independently link that identity to a named counterparty, and a name or premises match alone is not conclusive.`
+  };
+}
+
+// src/reconciliation.ts
+var normalize = (s) => s.trim().replace(/\s+/g, " ").toLowerCase();
+function minor(amount) {
+  const parts = /^(\d+)(?:\.(\d{1,2}))?$/.exec(String(amount));
+  const minor2 = parts && Number(parts[1] + (parts[2] ?? "").padEnd(2, "0"));
+  return typeof minor2 === "number" && Number.isSafeInteger(minor2) ? minor2 : void 0;
+}
+var compactAccount = (s) => s.replace(/^account\s+/i, "").replace(/[ -]/g, "").toUpperCase();
+var fullAccount = (s) => /^(?:\d{14}|[A-Z]{2}\d{2}[A-Z\d]{11,30})$/.test(s);
+var shortAccount = (s) => /^(?:(?:account|iban)\s+)?ending\s+(\d{4})$/i.exec(s.trim())?.[1];
+function oneText(facts, keys) {
+  const values = facts.filter((f) => keys.includes(f.field) && typeof f.value === "string").map((f) => f.value);
+  if (values.length === 1) return values[0];
+}
+function agreesWithDate(pack, doc, tx) {
+  const dated = oneText(doc.extraction.facts, ["documentDate"]);
+  const { from, to } = pack.caseRecord.review_window;
+  const day = tx.booked_at.slice(0, 10);
+  return !!dated && dated === doc.metadata.dated && from <= dated && dated <= day && day <= to;
+}
+function invoiceMatches(pack, doc, tx) {
+  if (doc.extraction.kind !== "invoice" || doc.extraction.entries.length || tx.direction !== "out" || !tx.counterparty_name || !agreesWithDate(pack, doc, tx)) return false;
+  const facts = doc.extraction.facts;
+  const payer = oneText(facts, ["billedTo", "buyer"]);
+  const payee = oneText(facts, ["payee"]);
+  const supplier = oneText(facts, ["supplier", "carrier"]);
+  const name = normalize(tx.counterparty_name);
+  const country = typeof tx.counterparty_country === "string" ? normalize(tx.counterparty_country) : "";
+  const samePayee = (value) => normalize(value) === name || !!country && normalize(value) === `${name}, ${country}`;
+  if (!payer || normalize(payer) !== normalize(pack.customer.name) || !payee && !supplier || payee && !samePayee(payee) || supplier && !samePayee(supplier)) return false;
+  const values = facts.filter((fact) => ["amountDue", "amount", "total"].includes(fact.field));
+  if (values.length !== 1 || typeof values[0].value === "string" || values[0].value.minorUnits <= 0 || values[0].value.minorUnits !== minor(tx.amount_gbp)) return false;
+  if (facts.some((fact) => fact.field === "terms" && typeof fact.value === "string" && /instal[l]?ment/i.test(fact.value))) return false;
+  const destinations = facts.filter((fact) => fact.field === "paymentDestination");
+  if (!destinations.length) return true;
+  if (destinations.length !== 1 || typeof destinations[0].value !== "string" || !tx.counterparty_account) return false;
+  const dest = compactAccount(destinations[0].value);
+  const account = compactAccount(tx.counterparty_account);
+  return fullAccount(dest) && dest === account;
+}
+function matchedInvoices(pack, transactions) {
+  const matches = [];
+  const documentCounts = /* @__PURE__ */ new Map();
+  const transactionCounts = /* @__PURE__ */ new Map();
+  for (const doc of pack.documents) {
+    if (doc.extraction.kind !== "invoice") continue;
+    for (const tx of transactions) {
+      if (!invoiceMatches(pack, doc, tx)) continue;
+      const id = doc.metadata.doc_id;
+      matches.push({ tx: tx.transaction_id, doc: id });
+      documentCounts.set(id, (documentCounts.get(id) ?? 0) + 1);
+      transactionCounts.set(tx.transaction_id, (transactionCounts.get(tx.transaction_id) ?? 0) + 1);
+    }
+  }
+  return new Map(matches.filter(({ doc, tx }) => documentCounts.get(doc) === 1 && transactionCounts.get(tx) === 1).map(({ doc, tx }) => [tx, doc]));
+}
+function ownedAccount(pack, tx) {
+  if (!tx.counterparty_account) return;
+  for (const doc of pack.documents) {
+    if (doc.extraction.kind !== "bankStatement") continue;
+    const accountHolder = oneText(doc.extraction.facts, ["accountHolder"]);
+    if (!accountHolder || normalize(accountHolder) !== normalize(pack.customer.name)) continue;
+    if (tx.counterparty_name && normalize(tx.counterparty_name) !== normalize(pack.customer.name)) continue;
+    const statementAccount = oneText(doc.extraction.facts, ["account"]);
+    if (!statementAccount) continue;
+    const account = compactAccount(statementAccount);
+    if (fullAccount(account) && account === compactAccount(tx.counterparty_account)) return doc.metadata.doc_id;
+    const suffix = shortAccount(statementAccount);
+    if (!suffix || suffix !== shortAccount(tx.counterparty_account)) continue;
+    const linked = doc.extraction.entries.some(({ kind, facts }) => kind === "statementMovement" && oneText(facts, ["movementDate"]) === tx.booked_at.slice(0, 10) && facts.some((f) => f.field === "amount" && typeof f.value !== "string" && f.value.minorUnits === minor(tx.amount_gbp)));
+    if (linked) return doc.metadata.doc_id;
+  }
+}
+
+// src/decision.ts
+var reasonCodes = {
+  CLOSE: [
+    "COLLECTION_DOCUMENTED",
+    "BUSINESS_RECORDS_RECONCILE",
+    "DOCUMENTED_EVENT",
+    "INVOICE_MATCHES",
+    "OWN_ACCOUNT",
+    "GROUP_COMPANY",
+    "THIRD_PARTY_DOCUMENTED",
+    "REFUND_OF_EARLIER_PAYMENT",
+    "RETURNING_CUSTOMER",
+    "LIST_MATCH_DIFFERENT_PARTY",
+    "WITHIN_PROFILE"
+  ],
+  RFI: ["RFI_PURPOSE_DOCUMENTS", "RFI_BUSINESS_RECORDS", "RFI_SOURCE_OF_FUNDS", "RFI_COUNTERPARTY_DETAILS", "RFI_UPDATED_PROFILE"],
+  ESCALATE: [
+    "ESC_MULE_ACTIVITY",
+    "ESC_STRUCTURING",
+    "ESC_UNEXPLAINED_FUNDS",
+    "ESC_PASS_THROUGH",
+    "ESC_INVOICE_MISMATCH",
+    "ESC_HIGH_RISK_CORRIDOR",
+    "ESC_ACCOUNT_MISUSE",
+    "ESC_THIRD_PARTY_FUNDING",
+    "ESC_EARLY_REDEMPTION",
+    "ESC_LISTED_PARTY"
+  ]
+};
+function record2(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+var label = (s) => s.replace(/\s+/g, " ").trim();
+var gbp = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" });
+var txText = (tx) => `${gbp.format(tx.amount_gbp)} ${tx.direction === "in" ? "from" : "to"} ${label(tx.counterparty_name ?? "an unidentified counterparty")} on ${tx.booked_at.slice(0, 10)} (${tx.transaction_id})`;
+var sentence = (s) => `${label(s).replace(/[.!?]+$/, "")}.`;
+var distinct = (ids2) => [...new Set(ids2)];
+function finding(verdict, code, facts, action, evidence, request) {
+  return { verdict, code, sentences: [sentence(facts), sentence(action)], evidence, request };
+}
+function anchor(txs, direction) {
+  return txs.reduce((largest, tx) => (!direction || tx.direction === direction) && (!largest || tx.amount_gbp > largest.amount_gbp) ? tx : largest, void 0);
+}
+function profile(pack, alert) {
+  const measured = record2(alert?.measured);
+  const declared = record2(pack.customer.declared);
+  const incoming = pack.windowTransactions.filter((t) => t.direction === "in");
+  const annual = declared.annual_turnover_gbp;
+  const income = declared.monthly_income_gbp;
+  const baseline = typeof measured.baseline_gbp === "number" && measured.baseline_gbp > 0 ? measured.baseline_gbp : typeof income === "number" && income > 0 ? income : typeof annual === "number" && annual > 0 ? annual / 12 : void 0;
+  const measuredReceived = measured.received_gbp;
+  const total = typeof measuredReceived === "number" ? measuredReceived : incoming.reduce((sum, tx) => sum + (minor(tx.amount_gbp) ?? 0), 0) / 100;
+  return { baseline, total, incoming };
+}
+var escalationByRule = {
+  TM02: "ESC_PASS_THROUGH",
+  TM06: "ESC_HIGH_RISK_CORRIDOR",
+  TM10: "ESC_EARLY_REDEMPTION"
+};
+function decideCase(pack) {
+  const { caseRecord, customer, alerts, documents, heldPayment } = pack;
+  const all = new Map(pack.flaggedTransactions.map((tx) => [tx.transaction_id, tx]));
+  if (heldPayment) all.set(heldPayment.transaction_id, heldPayment);
+  const invoiceIds = matchedInvoices(pack, [...all.values()]);
+  const ownership = new Map([...all.values()].map((tx) => [tx.transaction_id, ownedAccount(pack, tx)]));
+  const global = [];
+  const alertFindings = [];
+  const { from } = caseRecord.review_window;
+  const currentDocs = documents.filter((doc) => doc.metadata.dated >= from);
+  const reports = currentDocs.filter(({ metadata }) => metadata.type === "sending_bank_fraud_report");
+  const sample = anchor([...all.values()], "in") ?? anchor([...all.values()]);
+  if (reports.length) {
+    const subjects = reports.flatMap((doc) => {
+      const subject = /^\*\*Subject:\*\*\s*(.+)$/im.exec(doc.markdown)?.[1];
+      return subject ? [label(subject)] : [];
+    });
+    global.push(finding(
+      "ESCALATE",
+      "ESC_MULE_ACTIVITY",
+      `Sending-bank fraud ${reports.length === 1 ? "report" : "reports"} ${reports.map((d) => d.metadata.doc_id).join(", ")} ${subjects.length ? `record ${distinct(subjects).join("; ")} for activity on` : "raise a fraud concern on"} ${label(customer.name)}'s account`,
+      `Refer the account to the MLRO${sample ? ` and review the flagged flow including ${txText(sample)}` : " before any customer contact"}`,
+      [...reports.map((d) => d.metadata.doc_id), ...sample ? [sample.transaction_id] : []]
+    ));
+  }
+  for (const alert of alerts) {
+    const txs = alert.transaction_ids.map((id) => all.get(id));
+    const tx = alert.rule_id === "TM01" ? anchor(txs, "in") ?? anchor(txs) : anchor(txs);
+    const evidence = tx ? [tx.transaction_id] : [];
+    const trigger = tx ? `${alert.rule_id} flagged ${txText(tx)} in ${label(customer.name)}'s case` : `${alert.rule_id} flagged activity in ${label(customer.name)}'s ${caseRecord.review_window.from} to ${caseRecord.review_window.to} review`;
+    const notes = currentDocs.filter((doc) => doc.metadata.type === "staff_note");
+    if (alert.rule_id === "TM22") {
+      const assessment = assessListMatch(
+        { measured: alert.measured },
+        pack.internalList,
+        documents,
+        txs.flatMap((t) => t.counterparty_name ? [t.counterparty_name] : [])
+      );
+      const reliedOn2 = [...assessment.evidence, ...evidence];
+      if (assessment.status === "confirmed") {
+        alertFindings.push(finding(
+          "ESCALATE",
+          "ESC_LISTED_PARTY",
+          assessment.detail,
+          `${trigger}; refer this match to the MLRO`,
+          reliedOn2
+        ));
+      } else if (assessment.status === "different") {
+        const invoices = txs.flatMap((t) => invoiceIds.get(t.transaction_id) ?? []);
+        alertFindings.push(finding(
+          "CLOSE",
+          "LIST_MATCH_DIFFERENT_PARTY",
+          assessment.detail,
+          `${trigger}${invoices.length ? `, and ${distinct(invoices).join(", ")} reconciles the flagged payment evidence` : ""}`,
+          [...reliedOn2, ...invoices]
+        ));
+      } else {
+        alertFindings.push(finding(
+          "RFI",
+          "RFI_COUNTERPARTY_DETAILS",
+          assessment.detail,
+          `For ${tx ? txText(tx) : alert.alert_id}, ask for official identification of the matched counterparty or officer that distinguishes them from the listed party`,
+          reliedOn2,
+          `counterparty:${tx?.transaction_id ?? alert.alert_id}`
+        ));
+      }
+      continue;
+    }
+    if (alert.rule_id === "TM03") {
+      const note = notes.find((d) => /\b(?:below|under)\b[^.\n]{0,130}\b(?:threshold|reporting|verification|exempt)|\b(?:avoid|evade|bypass)\b[^.\n]{0,100}\b(?:threshold|reporting|verification|checks|invoice)/i.test(d.markdown));
+      if (note) {
+        alertFindings.push(finding(
+          "ESCALATE",
+          "ESC_STRUCTURING",
+          `${trigger}; staff note ${note.metadata.doc_id} records a discussion of staying below the applicable checks`,
+          "Refer the repeated subthreshold activity to the MLRO rather than contacting the customer",
+          [note.metadata.doc_id, ...alert.transaction_ids]
+        ));
+        continue;
+      }
+    }
+    if (alert.rule_id === "TM06") {
+      const note = notes.find((d) => /\b(?:unwilling|refused|declined)\s+to\s+(?:explain|clarify|disclose|identify|provide)/i.test(d.markdown));
+      if (note) {
+        alertFindings.push(finding(
+          "ESCALATE",
+          "ESC_HIGH_RISK_CORRIDOR",
+          `${trigger}; staff note ${note.metadata.doc_id} records a refusal to explain or substantiate the activity`,
+          "Pass the unexplained higher-risk activity to the MLRO",
+          [note.metadata.doc_id, ...evidence]
+        ));
+        continue;
+      }
+    }
+    const own = txs.flatMap((t) => ownership.get(t.transaction_id) ?? []);
+    const invoice = txs.flatMap((t) => invoiceIds.get(t.transaction_id) ?? []);
+    if (txs.length && own.length === txs.length && ["TM01", "TM02", "TM06", "TM08"].includes(alert.rule_id)) {
+      const p = profile(pack, alert.rule_id === "TM01" ? alert : void 0);
+      const tied = [...distinct(own), ...alert.transaction_ids];
+      if (!p.baseline || Number(p.total.toFixed(2)) >= Number((5 * p.baseline).toFixed(2))) {
+        const ratio = p.baseline ? `${gbp.format(p.total)} against a declared monthly baseline of ${gbp.format(p.baseline)}` : "no usable declared monthly amount for comparison";
+        alertFindings.push(finding(
+          "RFI",
+          "RFI_UPDATED_PROFILE",
+          `${distinct(own).join(", ")} documents the other account ownership for ${tx ? txText(tx) : alert.alert_id}, with ${ratio}`,
+          `Ask ${label(customer.name)} for their updated expected monthly income or payment volume`,
+          tied,
+          "profile"
+        ));
+      } else {
+        alertFindings.push(finding(
+          "CLOSE",
+          "OWN_ACCOUNT",
+          `${distinct(own).join(", ")} identifies the other accounts as held by ${label(customer.name)} and supports the flagged transfers`,
+          `${trigger}; reviewed inflows of ${gbp.format(p.total)} are below five times the ${gbp.format(p.baseline)} monthly baseline`,
+          tied
+        ));
+      }
+      continue;
+    }
+    if (txs.length && invoice.length === txs.length && ["TM04", "TM06"].includes(alert.rule_id)) {
+      alertFindings.push(finding(
+        "CLOSE",
+        "INVOICE_MATCHES",
+        `${distinct(invoice).join(", ")} reconciles the billed customer, payee, date and amount for the flagged payments`,
+        `${trigger}; the invoices explain the flagged outgoing activity`,
+        [...distinct(invoice), ...alert.transaction_ids]
+      ));
+      continue;
+    }
+    if (alert.rule_id === "TM02" && txs.some((t) => t.direction === "in") && txs.some((t) => t.direction === "out") && new Set(txs.filter((t) => !ownership.get(t.transaction_id)).map((t) => normalize(t.counterparty_name ?? ""))).size > 1) {
+      const incoming = anchor(txs, "in");
+      const outgoing = anchor(txs, "out");
+      alertFindings.push(finding(
+        "ESCALATE",
+        "ESC_PASS_THROUGH",
+        `The rapid-movement alert links ${txText(incoming)} and ${txText(outgoing)}`,
+        "The available reconciliations do not explain the flows between the parties; refer the linked movements to the MLRO",
+        [incoming.transaction_id, outgoing.transaction_id]
+      ));
+      continue;
+    }
+    const subjectTx = alert.rule_id === "TM01" || alert.rule_id === "TM05" ? tx : heldPayment ?? tx;
+    const description = subjectTx ? txText(subjectTx) : `alert ${alert.alert_id}`;
+    const requestEvidence = subjectTx ? [subjectTx.transaction_id, ...evidence] : evidence;
+    if (alert.rule_id === "TM03" && caseRecord.institution !== "payments_fx") {
+      alertFindings.push(finding(
+        "RFI",
+        "RFI_BUSINESS_RECORDS",
+        `${trigger}; the repeated cash activity has not been reconciled to the underlying receipts`,
+        `Ask for the cash receipts ledger covering the flagged deposits or top-ups in the ${caseRecord.review_window.from} to ${caseRecord.review_window.to} window`,
+        alert.transaction_ids,
+        "cash-ledger"
+      ));
+    } else if (alert.rule_id === "TM01" || alert.rule_id === "TM05") {
+      const p = profile(pack, alert.rule_id === "TM01" ? alert : void 0);
+      const appendix = alert.rule_id === "TM01" && p.baseline ? `; the review records ${gbp.format(p.total)} against a ${gbp.format(p.baseline)} monthly baseline` : "";
+      const inflows = txs.filter((t) => t.direction === "in");
+      const scope = alert.rule_id === "TM01" && inflows.length > 1 ? `${description} and the other flagged inflows in the review window` : description;
+      alertFindings.push(finding(
+        "RFI",
+        "RFI_SOURCE_OF_FUNDS",
+        trigger + appendix,
+        `Ask for the source-of-funds record showing how the money for ${scope} was obtained`,
+        requestEvidence,
+        `source:${subjectTx?.transaction_id ?? alert.alert_id}`
+      ));
+    } else if (alert.rule_id === "TM08") {
+      alertFindings.push(finding(
+        "RFI",
+        "RFI_COUNTERPARTY_DETAILS",
+        `${trigger}; the other account's ownership or relationship to the customer is not established`,
+        `Ask for the originating or receiving account statement naming its holder for ${description}`,
+        requestEvidence,
+        `counterparty:${subjectTx?.transaction_id ?? alert.alert_id}`
+      ));
+    } else {
+      const purpose = alert.rule_id === "TM07" ? "the instruction documenting why the dormant account was reactivated for" : alert.rule_id === "TM10" ? "the redemption instruction documenting the purpose of" : "the underlying invoice or signed payment instruction showing the purpose of";
+      alertFindings.push(finding(
+        "RFI",
+        "RFI_PURPOSE_DOCUMENTS",
+        `${trigger}; the records do not substantiate the purpose of the flagged activity`,
+        `Ask for ${purpose} ${description}`,
+        requestEvidence,
+        `purpose:${subjectTx?.transaction_id ?? alert.alert_id}`
+      ));
+    }
+  }
+  if (caseRecord.institution === "payments_fx" && heldPayment && heldPayment.amount_gbp >= 1e4 && !ownership.get(heldPayment.transaction_id) && !invoiceIds.has(heldPayment.transaction_id)) {
+    const hasBill = documents.some((doc) => doc.extraction.kind === "invoice" || /contract/.test(doc.metadata.type));
+    if (!hasBill) {
+      global.push(finding(
+        "RFI",
+        "RFI_PURPOSE_DOCUMENTS",
+        `The held payment of ${txText(heldPayment)} requires an invoice or contract before release`,
+        "Ask for the invoice or signed contract naming the beneficiary and tying the amount to this held payment",
+        [heldPayment.transaction_id],
+        `purpose:${heldPayment.transaction_id}`
+      ));
+    } else {
+      global.push(finding(
+        "RFI",
+        "RFI_PURPOSE_DOCUMENTS",
+        `No invoice or contract has been reconciled to the held payment of ${txText(heldPayment)}`,
+        "Ask for the invoice or signed contract that identifies this beneficiary and supports the exact held amount",
+        [heldPayment.transaction_id],
+        `purpose:${heldPayment.transaction_id}`
+      ));
+    }
+  }
+  const decisions = [...global, ...alertFindings];
+  const suspicion = decisions.find((f) => f.verdict === "ESCALATE");
+  const gaps = decisions.filter((f) => f.verdict === "RFI");
+  let primary;
+  let reliedOn;
+  let extra = "";
+  if (suspicion) {
+    primary = suspicion;
+    reliedOn = [primary];
+  } else if (gaps.length && new Set(gaps.map((f) => f.request)).size === 1) {
+    primary = gaps[0];
+    reliedOn = decisions;
+  } else if (gaps.length || !decisions.length) {
+    const relevant = alerts.find((a) => a.rule_id === "TM02") ?? alerts.find((a) => a.rule_id === "TM06") ?? alerts[0];
+    const codes = relevant ? escalationByRule[relevant.rule_id] : void 0;
+    const context = sample ? `, including ${txText(sample)}` : "";
+    primary = finding(
+      "ESCALATE",
+      codes ?? "ESC_UNEXPLAINED_FUNDS",
+      `The review of ${label(customer.name)} leaves ${gaps.length || "unassessed"} material evidence gaps${context}`,
+      "No single request would settle the outstanding activity, so refer the case to the MLRO rather than close it",
+      sample ? [sample.transaction_id] : []
+    );
+    reliedOn = [primary, ...gaps];
+  } else {
+    primary = decisions.find((f) => f.code === "LIST_MATCH_DIFFERENT_PARTY") ?? decisions[0];
+    reliedOn = decisions;
+  }
+  if (primary.verdict !== "ESCALATE" && reliedOn.length > 1) {
+    const other = reliedOn.find((f) => f !== primary && f.verdict === "CLOSE" && f.sentences[0] !== primary.sentences[0]);
+    if (other) extra = ` ${other.sentences[0]}`;
+  }
+  return {
+    case_id: caseRecord.case_id,
+    alert_ids: caseRecord.alert_ids,
+    verdict: primary.verdict,
+    reason_code: primary.code,
+    reason: primary.sentences.join(" ") + extra,
+    evidence: distinct(reliedOn.flatMap((f) => f.evidence))
+  };
+}
+
+// src/submission.ts
+function verify(pack, result) {
+  const { case_id, alert_ids } = pack.caseRecord;
+  if (result.case_id !== case_id || result.alert_ids.length !== alert_ids.length || alert_ids.some((id, i) => result.alert_ids[i] !== id)) {
+    throw new Error(`${case_id}: incorrect case or alert coverage`);
+  }
+  const allowedCodes = reasonCodes[result.verdict];
+  if (!allowedCodes?.includes(result.reason_code) || !result.reason.trim()) {
+    throw new Error(`${case_id}: invalid verdict, reason code, or explanation`);
+  }
+  const validEvidence = /* @__PURE__ */ new Set([
+    ...pack.flaggedTransactions.map((row) => row.transaction_id),
+    ...pack.windowTransactions.map((row) => row.transaction_id),
+    ...pack.heldPayment ? [pack.heldPayment.transaction_id] : [],
+    ...pack.documents.map((doc) => doc.metadata.doc_id),
+    ...pack.internalList.map((row) => row.entry_id)
+  ]);
+  if (new Set(result.evidence).size !== result.evidence.length || result.evidence.some((id) => !validEvidence.has(id))) {
+    throw new Error(`${case_id}: invalid evidence reference`);
+  }
+}
+function runSubmission(input, output) {
+  const target = resolve2(output);
+  const canonical = join2(realpathSync3(dirname(target)), basename(target));
+  const inputRoot = realpathSync3(input);
+  const sub = relative3(inputRoot, canonical);
+  if (!sub || sub !== ".." && !sub.startsWith(`..${sep3}`) && !isAbsolute3(sub)) {
+    throw new Error("Output must not overwrite or be placed inside the supplied institution directory");
+  }
+  const existing = lstatSync(canonical, { throwIfNoEntry: false });
+  if (existing && (!existing.isFile() || existing.nlink > 1)) {
+    throw new Error("Output path must be a regular, unshared file");
+  }
+  const reader = loadInstitutionCases(inputRoot);
+  const lines = [];
+  for (const id of reader.caseIds) {
+    const pack = reader.get(id);
+    const result = decideCase(pack);
+    verify(pack, result);
+    lines.push(JSON.stringify(result));
+  }
+  writeFileSync(canonical, lines.length ? `${lines.join("\n")}
+` : "", "utf8");
+}
+
 // src/index.ts
-console.log("FinCrime Hackathon \u2014 Track 1: Transaction monitoring");
+var arguments_ = process.argv.slice(2);
+if (arguments_.length === 1 && ["--help", "-h"].includes(arguments_[0])) {
+  console.log("Usage: system/run <institution-folder> <output-file>");
+} else if (arguments_.length !== 2 || arguments_.some((arg) => !arg.trim())) {
+  console.error("Usage: system/run <institution-folder> <output-file>");
+  process.exitCode = 2;
+} else {
+  try {
+    runSubmission(arguments_[0], arguments_[1]);
+  } catch (error) {
+    console.error(`run: ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+  }
+}
