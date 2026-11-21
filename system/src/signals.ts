@@ -35,8 +35,12 @@ function controllers(doc: EvidenceDocument): string[] {
   ].filter(Boolean);
 }
 
-const STRUCTURING_LIMIT = /\b(?:below|under|less than)\s+(?:the\s+)?£\s?[\d,]+|\b(?:below|under)\b[^.\n]{0,130}\b(?:threshold|limit)\b/i;
-const STRUCTURING_PURPOSE = /\b(?:exempt\w*|avoid\w*|evad\w*|bypass\w*|circumvent\w*|identity|identification|verification|ID checks?|reporting|invoice requirement)\b/i;
+const STRUCTURING_LIMIT = /\b(?:below|under|less than)\s+(?:the\s+)?(?:£\s?[\d,]+|a grand|\d+\s?k\b)|\b(?:below|under)\b[^.\n]{0,130}\b(?:threshold|limit)\b/i;
+const STRUCTURING_PURPOSE = /\b(?:exempt\w*|avoid\w*|evad\w*|bypass\w*|circumvent\w*|identity|identification|verification|ID checks?|reporting|invoice requirement|source of (?:the )?(?:cash|funds|money)|where (?:it|the cash|the money) came from)\b/i;
+/** Keeping amounts under a limit for the purpose of escaping the checks it triggers. "ID" is matched case-sensitively. */
+const admitsStructuring = (text: string) => STRUCTURING_LIMIT.test(text) && (STRUCTURING_PURPOSE.test(text) || /\bID\b/.test(text));
+/** What the customer themselves wrote in a chat, without the agent's replies. */
+const customerTurns = (markdown: string) => [...markdown.matchAll(/^\*\*Customer:\*\*\s*(.+)$/gim)].map((m) => m[1]).join("\n");
 /** A customer saying other people use their account ("investing through mine"). */
 const ACCOUNT_USED_BY_OTHERS = /^\*\*Customer:\*\*.*\b(?:through|via|using) (?:mine|my account)\b/im;
 const REFUSAL = /\b(?:unable|unwilling|declin\w*|evasive|refus\w*|would not|did not (?:explain|provide|clarify))\b|\bno clear\b/i;
@@ -49,15 +53,15 @@ export function findSignals(pack: InstitutionCasePack, explained: ExplanationInd
     .map((tx) => [tx.transaction_id, tx])).values()];
   const currentNotes = customerDocs(pack, "staff_note").filter((doc) => (isoDay(doc.metadata.dated) ?? "") >= from);
   const casePaymentIds = new Set([...flagged, ...(pack.heldPayment ? [pack.heldPayment] : [])].map((tx) => tx.transaction_id));
-  for (const { doc, tx, payee } of explained.invoicePayeeConflicts) {
+  for (const { doc, tx, detail } of explained.invoicePayeeConflicts) {
     if (!casePaymentIds.has(tx.transaction_id)) continue;
     signals.push({ code: "ESC_INVOICE_MISMATCH", evidence: [doc.metadata.doc_id, tx.transaction_id],
-      fact: `${doc.metadata.doc_id} names ${label(payee)} as the payment beneficiary, contradicting ${describe(tx)}` });
+      fact: `${doc.metadata.doc_id} ${detail}, contradicting ${describe(tx)}` });
   }
 
   for (const note of currentNotes) {
     const text = note.markdown.replace(/^#.*$/m, "");
-    if (STRUCTURING_LIMIT.test(text) && STRUCTURING_PURPOSE.test(text)) {
+    if (admitsStructuring(text)) {
       const split = pack.alerts.filter((alert) => alert.rule_id === "TM03" || alert.rule_id === "TM05").flatMap((alert) => alert.transaction_ids);
       signals.push({ code: "ESC_STRUCTURING", evidence: [note.metadata.doc_id, ...split],
         fact: `Staff note ${note.metadata.doc_id} records ${label(pack.customer.name)} asking how to keep payments below a threshold to avoid the related checks` });
@@ -73,6 +77,12 @@ export function findSignals(pack: InstitutionCasePack, explained: ExplanationInd
   }
 
   for (const chat of customerDocs(pack, "support_chat").filter((doc) => (isoDay(doc.metadata.dated) ?? "") >= from)) {
+    // The same admission counts whether a member of staff wrote it down or the customer typed it in a chat.
+    if (admitsStructuring(customerTurns(chat.markdown))) {
+      const split = pack.alerts.filter((alert) => alert.rule_id === "TM03" || alert.rule_id === "TM05").flatMap((alert) => alert.transaction_ids);
+      signals.push({ code: "ESC_STRUCTURING", evidence: [chat.metadata.doc_id, ...split],
+        fact: `In chat ${chat.metadata.doc_id} ${label(pack.customer.name)} says they keep each payment under a limit so that the related checks are not triggered` });
+    }
     const line = ACCOUNT_USED_BY_OTHERS.exec(chat.markdown)?.[0];
     if (!line) continue;
     const tx = largest(flagged.filter((t) => t.direction === "in" && !sameName(t.counterparty_name, pack.customer.name)));

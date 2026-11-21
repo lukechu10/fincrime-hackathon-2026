@@ -285,3 +285,57 @@ test("a contract payment schedule closes stage payments only on the exact due da
   assert.equal(run(stage(9500)).reason_code, "INVOICE_MATCHES");
   assert.notEqual(run(stage(9600)).verdict, "CLOSE");
 });
+
+test("a statement showing a joint account the customer holds explains a payout named after the other holder", () => {
+  const payout = tx("OUT", "out", 6000, "Casey Tester", { counterparty_account: "11-22-33 44556677", reference: "WITHDRAWAL" });
+  const statement = (holders: string) => doc("STM", "bank_statement",
+    `# Statement from Test Bank\n\n**Account holders:** ${holders}\n**Account:** 11-22-33 44556677\n\n12 September 2026: Credit £6,000.00 from Test Invest`);
+  const run = (holders: string) => decide({ institution: "investment", alerts: [alert("A1", "TM08", [payout])], txs: [payout], docs: [statement(holders)] });
+  const joint = run("Robin Tester and Casey Tester");
+  assert.equal(joint.verdict, "CLOSE");
+  assert.equal(joint.reason_code, "OWN_ACCOUNT");
+  assert.ok(joint.evidence.includes("STM"));
+  // The customer is not a holder, so the payee is a third party.
+  assert.equal(run("Casey Tester and Lee Other").verdict, "ESCALATE");
+});
+
+test("structuring admitted by the customer in a chat escalates; the agent's own words do not count", () => {
+  const topups = ["T1", "T2", "T3", "T4"].map((id, i) => tx(id, "in", 950 + i * 10, null, { channel: "cash_topup", reference: "CASH TOP-UP" }));
+  const run = (chat: string) => decide({ institution: "emoney", alerts: [alert("A1", "TM03", topups)], txs: topups,
+    docs: [doc("CHAT", "support_chat", `# Chat with the customer\n\n${chat}`)] });
+  const admitted = run("**Customer:** I load the cash in bits, each one under a grand, so the app doesn't ask me for ID.\n\n**Agent:** All top-ups are monitored.");
+  assert.equal(admitted.verdict, "ESCALATE");
+  assert.equal(admitted.reason_code, "ESC_STRUCTURING");
+  assert.ok(admitted.evidence.includes("CHAT"));
+  const agentOnly = run("**Agent:** Some people keep top-ups under £1,000 to avoid ID checks; we monitor all amounts.\n\n**Customer:** OK, thanks.");
+  assert.equal(agentOnly.verdict, "RFI");
+});
+
+test("money from unrelated payers moved on to crypto is mule activity even when only the reference names the asset", () => {
+  const ins = [tx("IN1", "in", 1800, "Jo Payer"), tx("IN2", "in", 1650, "Sam Sender")];
+  const run = (payee: string, reference: string) => {
+    const out = tx("OUT", "out", 3400, payee, { reference });
+    return decide({ institution: "emoney", alerts: [alert("A1", "TM02", [...ins, out])], txs: [...ins, out] });
+  };
+  const crypto = run("Northwind Digital Assets Ltd", "BTC PURCHASE 77");
+  assert.equal(crypto.verdict, "ESCALATE");
+  assert.equal(crypto.reason_code, "ESC_MULE_ACTIVITY");
+  assert.equal(run("Northwind Ventures Ltd", "BTC PURCHASE 77").reason_code, "ESC_MULE_ACTIVITY");
+  assert.equal(run("Northwind Supplies Ltd", "STOCK ORDER").verdict, "RFI");
+});
+
+test("an invoice quoted by the held payment but for a different amount escalates as an invoice mismatch", () => {
+  const funding = tx("FUND", "in", 15000, "Robin Tester", { booked_at: "2026-09-11T10:00:00Z", reference: "FUNDING" });
+  const run = (amount: number) => {
+    const held = tx("HELD", "out", amount, "Vendor GmbH", { channel: "swift", counterparty_account: "IBAN ending 4418", counterparty_country: "Germany", reference: "VG-100" });
+    const invoice = doc("INV", "invoice", "# Invoice VG-100 from Vendor GmbH\n\n**Supplier:** Vendor GmbH\n**Bill to:** Robin Tester\n**Invoice number:** VG-100\n**Amount due:** £12,000.00\n**Pay to:** Vendor GmbH, IBAN ending 4418");
+    return decide({ institution: "payments_fx", alerts: [alert("A1", "TM06", [held])], txs: [funding, held], docs: [invoice], held });
+  };
+  const mismatch = run(15000);
+  assert.equal(mismatch.verdict, "ESCALATE");
+  assert.equal(mismatch.reason_code, "ESC_INVOICE_MISMATCH");
+  assert.deepEqual(new Set(mismatch.evidence), new Set(["INV", "HELD"]));
+  const matching = run(12000);
+  assert.equal(matching.verdict, "CLOSE");
+  assert.equal(matching.reason_code, "INVOICE_MATCHES");
+});

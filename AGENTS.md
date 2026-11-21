@@ -82,8 +82,19 @@ Update this section when changing decision logic or completing a review round. R
     - a refund whose original payment is outside the window becomes an RFI;
     - an invoice diversion becomes an RFI instead of escalating.
 - **Early-redemption evidence fix:** the redundancy path now checks the fund pair named by each TM10 alert and requires a matching employer letter dated during the holding plus a customer sale request citing redundancy, dated between the letter and the sale. It no longer infers a request or claims a living-cost purpose. All 62 tests and the type-checked bundle build passed. Regenerating all four development outputs left all 4,000 verdicts and reason codes unchanged; only the 46 redundancy explanation texts changed. Across the expanded 40-case synthetic suite, `SYN-IV-07-CS` was the only change (CLOSE to RFI); cost fell from 61 to 51, with zero wrongful closes and byte-identical outputs on five runs. This remains a targeted local suite, and reworded evidence not recognized by the parser can still fall to RFI.
+- **Synthetic logic gaps fixed:** these five gaps would remain even with perfect parsing; IV-07 was already fixed in the early-redemption commit.
+  - **Joint accounts:** a statement listing the customer as a joint holder now explains a payment named after the other holder (IV-08).
+  - **Structuring in chats:** the customer's own words in a support chat now count as a structuring admission, and "under a grand" or "asks for ID" phrasing is recognised (EM-06). Agent text is ignored.
+  - **Crypto:** recognised from the payee's name (including "digital assets") or a reference naming an asset such as BTC (EM-07).
+  - **Open register roles:** a role with no end date continues after the register's own date, while a missing start date is still not backdated (BK-09). This changes an existing test's expectation, which is intended.
+  - **Invoice contradictions:** an ordinary invoice reference is also read from an "Invoice number" field. A payment that quotes an invoice and goes to its issuer, but for a different amount, now escalates as `ESC_INVOICE_MISMATCH` (PX-09). A different beneficiary already did, once the reference was read (PX-04).
+  - **Verification:**
+    - Development outputs are byte-identical, so the dev score is unchanged at 156.
+    - Synthetic cases: cost went from 51 to 33, with correct verdicts up from 23/40 to 29/40, zero wrongful closes, and all 40 reproducible across five runs.
+    - Tests: five new regression tests plus one updated test, 67 in total, all passing except the Windows symlink test.
+  - **Still open:** the remaining synthetic misses are wording and layout parses, such as solicitor and gift wording, prose contracts and ownership, and the insurer net of excess, plus three reason-code choices.
 - **Next priority:**
-  - **Make the escalation signals robust to rewording** (structuring notes, invoice diversion); the synthetic suite shows both falling to RFI.
+  - **Make the free-text parsers robust to rewording**, or add the LLM fallback reader for documents no parser recognizes; the remaining synthetic misses are of this kind.
   - **Measure generalization:** hand-check a fresh stratified sample of outputs, especially every CLOSE path, for wording and evidence quality.
   - **Stress-test trap variants** by mutating development cases: change an amount, donor, account or date, and confirm closes fall away.
   - **Decide the no-document TM08 reason code.**

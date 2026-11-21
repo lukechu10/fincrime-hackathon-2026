@@ -42,16 +42,16 @@ The runner is deterministic and makes no model calls. It treats alerts as alread
    At payments/FX, routine own-name funding is normal. A large dedicated funding transfer counts as explained only when the payment it funded within three days is itself documented.
 2. **Look for suspicion** ([`signals.ts`](src/signals.ts)). Each of the following is a concrete signal:
    - A current sending-bank fraud report.
-   - A staff note about staying under a threshold.
+   - A staff note, or the customer's own words in a support chat, about keeping payments under a limit to avoid the related checks.
    - A staff note recording a refusal to explain a higher-risk route.
    - A device shared with other customers.
    - A customer saying others use their account.
    - A payer company dissolved before it paid.
    - Payees controlled by the customer's own director.
-   - An invoice table that contradicts the payment it names, or a linked ordinary invoice that names a different payment beneficiary.
+   - An invoice table that contradicts the payment it names, or an ordinary invoice quoted by a payment that names a different beneficiary or bills a different amount.
    - A payment file with many payees sharing a few addresses.
 3. **Assess each alert against its own rule.**
-   - **Internal-list matches (TM22)** use the list assessment. Registers are read on the transaction date, and a gift letter's stated date of birth counts as identity evidence.
+   - **Internal-list matches (TM22)** use the list assessment. Registers are read on the transaction date: a role with no end date continues after the register's own date, but is not backdated before its start. A gift letter's stated date of birth counts as identity evidence.
    - **Every other alert** is covered when what remains unexplained falls below that rule's own threshold:
      - TM01: only the customer's own top-ups may remain, within the rule's multiple.
      - TM02: the remaining unexplained inflow is below £2,000 **and** every material flagged onward payment is explained.
@@ -59,7 +59,7 @@ The runner is deterministic and makes no model calls. It treats alerts as alread
      - TM06 and TM07: the remaining amount is below the limit.
      - All other rules: nothing may remain.
    - **When an alert is not covered,** it escalates only on a concrete pattern:
-     - Rapid movement on to crypto, individuals abroad or several unrelated people.
+     - Rapid movement on to crypto (recognised from the payee's name or a reference naming a crypto asset), individuals abroad or several unrelated people.
      - Higher-risk-country payments with several unrelated individuals.
      - Third-party payouts at investment.
    - **Otherwise it becomes one specific request.** An unexplained outflow asks for purpose documents and an unexplained inflow for source of funds. Rule-specific requests cover cash records, counterparty details and reasons for early redemption.

@@ -755,7 +755,7 @@ function ownAccount(ctx, add) {
       const moved = movements.some((m) => m.day && Math.abs(daysBetween(m.day, txDay(tx))) <= 2 && m.amounts.some((a) => samePence(tx, a)));
       const heldBy = [...md.matchAll(/Account (.+?) is held by (.+?)\.(?:\s|$)/g)].some((m) => sameName(m[2], ctx.name) && sameAccount(m[1], tx.counterparty_account));
       const account = field2(md, "Account");
-      const named = !tx.counterparty_name || sameName(tx.counterparty_name, ctx.name) || sameName(tx.counterparty_name, accountName);
+      const named = !tx.counterparty_name || sameName(tx.counterparty_name, ctx.name) || sameName(tx.counterparty_name, accountName) || isHolder && holders.some((h) => sameName(h, tx.counterparty_name));
       const ok = heldBy && moved || isHolder && named && sameAccount(account, tx.counterparty_account) && (!/ending/i.test(account ?? "") || moved);
       if (!ok) continue;
       add(tx, {
@@ -791,13 +791,17 @@ function invoices(ctx, add) {
     const accountOnly = payTo && /^(?:IBAN|account)\b/i.test(payTo);
     const payee = namedDestination ? namedDestination[1] : accountOnly ? void 0 : payTo;
     const account = namedDestination ? namedDestination[2] : accountOnly ? payTo : void 0;
-    const ref = /\b(INV \d+|CARRIER \d+|PO \d+)\b/.exec(title(md))?.[1] ?? /\border (PO \d+)\b/i.exec(field2(md, "Goods") ?? "")?.[1];
+    const ref = /\b(INV \d+|CARRIER \d+|PO \d+)\b/.exec(title(md))?.[1] ?? /\border (PO \d+)\b/i.exec(field2(md, "Goods") ?? "")?.[1] ?? field2(md, "Invoice number");
     if (!issuers.length && !payee) continue;
     for (const tx of ctx.history) {
+      if (tx.direction === "out" && ref && refHas(tx, ref) && relevant.has(tx.transaction_id) && !samePence(tx, amount) && recentBefore(doc, tx, 60) && issuers.length > 0 && issuers.every((issuer) => sameName(tx.counterparty_name, issuer))) {
+        conflicts.push({ doc, tx, detail: `bills ${amounts[0]} under ${ref}` });
+        continue;
+      }
       if (tx.direction !== "out" || !samePence(tx, amount) || !recentBefore(doc, tx, 60) || issuers.some((issuer) => !sameName(tx.counterparty_name, issuer)) || ref && !refHas(tx, ref)) continue;
       const accountMatches = !!account && sameAccount(account, tx.counterparty_account);
       if (payee && !sameName(payee, tx.counterparty_name)) {
-        if (relevant.has(tx.transaction_id) && (ref || accountMatches)) conflicts.push({ doc, tx, payee });
+        if (relevant.has(tx.transaction_id) && (ref || accountMatches)) conflicts.push({ doc, tx, detail: `names ${label(payee)} as the payment beneficiary` });
         continue;
       }
       if (account && !accountMatches) continue;
@@ -1417,7 +1421,7 @@ function hasActiveRole(entry, doc, paymentDate) {
   const { starts, ends } = roleDates(entry);
   if (starts.length > 1 || ends.length > 1) return false;
   const start = starts[0] ?? doc.metadata.dated;
-  return start <= paymentDate && (ends[0] ? paymentDate < ends[0] : paymentDate <= doc.metadata.dated);
+  return start <= paymentDate && (!ends[0] || paymentDate < ends[0]);
 }
 function companyName(doc) {
   const extracted = textFacts(doc.extraction.facts, "company").find((value) => value.trim());
@@ -1631,8 +1635,10 @@ function controllers(doc) {
     ...tableRows(doc.markdown, ["person", "control"]).map((row) => row.person)
   ].filter(Boolean);
 }
-var STRUCTURING_LIMIT = /\b(?:below|under|less than)\s+(?:the\s+)?£\s?[\d,]+|\b(?:below|under)\b[^.\n]{0,130}\b(?:threshold|limit)\b/i;
-var STRUCTURING_PURPOSE = /\b(?:exempt\w*|avoid\w*|evad\w*|bypass\w*|circumvent\w*|identity|identification|verification|ID checks?|reporting|invoice requirement)\b/i;
+var STRUCTURING_LIMIT = /\b(?:below|under|less than)\s+(?:the\s+)?(?:£\s?[\d,]+|a grand|\d+\s?k\b)|\b(?:below|under)\b[^.\n]{0,130}\b(?:threshold|limit)\b/i;
+var STRUCTURING_PURPOSE = /\b(?:exempt\w*|avoid\w*|evad\w*|bypass\w*|circumvent\w*|identity|identification|verification|ID checks?|reporting|invoice requirement|source of (?:the )?(?:cash|funds|money)|where (?:it|the cash|the money) came from)\b/i;
+var admitsStructuring = (text2) => STRUCTURING_LIMIT.test(text2) && (STRUCTURING_PURPOSE.test(text2) || /\bID\b/.test(text2));
+var customerTurns = (markdown) => [...markdown.matchAll(/^\*\*Customer:\*\*\s*(.+)$/gim)].map((m) => m[1]).join("\n");
 var ACCOUNT_USED_BY_OTHERS = /^\*\*Customer:\*\*.*\b(?:through|via|using) (?:mine|my account)\b/im;
 var REFUSAL = /\b(?:unable|unwilling|declin\w*|evasive|refus\w*|would not|did not (?:explain|provide|clarify))\b|\bno clear\b/i;
 function findSignals(pack, explained) {
@@ -1642,17 +1648,17 @@ function findSignals(pack, explained) {
   const subjects = [...new Map([...pack.windowTransactions, ...flagged, ...pack.heldPayment ? [pack.heldPayment] : []].map((tx) => [tx.transaction_id, tx])).values()];
   const currentNotes = customerDocs(pack, "staff_note").filter((doc) => (isoDay(doc.metadata.dated) ?? "") >= from);
   const casePaymentIds = new Set([...flagged, ...pack.heldPayment ? [pack.heldPayment] : []].map((tx) => tx.transaction_id));
-  for (const { doc, tx, payee } of explained.invoicePayeeConflicts) {
+  for (const { doc, tx, detail } of explained.invoicePayeeConflicts) {
     if (!casePaymentIds.has(tx.transaction_id)) continue;
     signals.push({
       code: "ESC_INVOICE_MISMATCH",
       evidence: [doc.metadata.doc_id, tx.transaction_id],
-      fact: `${doc.metadata.doc_id} names ${label2(payee)} as the payment beneficiary, contradicting ${describe(tx)}`
+      fact: `${doc.metadata.doc_id} ${detail}, contradicting ${describe(tx)}`
     });
   }
   for (const note of currentNotes) {
     const text2 = note.markdown.replace(/^#.*$/m, "");
-    if (STRUCTURING_LIMIT.test(text2) && STRUCTURING_PURPOSE.test(text2)) {
+    if (admitsStructuring(text2)) {
       const split = pack.alerts.filter((alert) => alert.rule_id === "TM03" || alert.rule_id === "TM05").flatMap((alert) => alert.transaction_ids);
       signals.push({
         code: "ESC_STRUCTURING",
@@ -1672,6 +1678,14 @@ function findSignals(pack, explained) {
     }
   }
   for (const chat of customerDocs(pack, "support_chat").filter((doc) => (isoDay(doc.metadata.dated) ?? "") >= from)) {
+    if (admitsStructuring(customerTurns(chat.markdown))) {
+      const split = pack.alerts.filter((alert) => alert.rule_id === "TM03" || alert.rule_id === "TM05").flatMap((alert) => alert.transaction_ids);
+      signals.push({
+        code: "ESC_STRUCTURING",
+        evidence: [chat.metadata.doc_id, ...split],
+        fact: `In chat ${chat.metadata.doc_id} ${label2(pack.customer.name)} says they keep each payment under a limit so that the related checks are not triggered`
+      });
+    }
     const line = ACCOUNT_USED_BY_OTHERS.exec(chat.markdown)?.[0];
     if (!line) continue;
     const tx = largest(flagged.filter((t) => t.direction === "in" && !sameName(t.counterparty_name, pack.customer.name)));
@@ -1862,7 +1876,7 @@ function covered(pack, alert, txs, open) {
       return open.length === 0;
   }
 }
-var isCrypto = (tx) => /\b(?:exchange|crypto|coin\w*)\b/i.test(tx.counterparty_name ?? "");
+var isCrypto = (tx) => /\b(?:exchange|crypto\w*|coin\w*|digital assets?|digital currenc\w*|blockchain|tokens?)\b/i.test(tx.counterparty_name ?? "") || /\b(?:btc|eth|usdt|usdc|bitcoin|ethereum|crypto\w*|stablecoin\w*)\b/i.test(typeof tx.reference === "string" ? tx.reference : "");
 var abroad = (tx) => !!tx.counterparty_country && norm(String(tx.counterparty_country)) !== "united kingdom";
 function rapidMovementSuspicion(pack, open) {
   const outs = open.filter((tx) => tx.direction === "out" && tx.amount_gbp >= 500 && !sameName(tx.counterparty_name, pack.customer.name));

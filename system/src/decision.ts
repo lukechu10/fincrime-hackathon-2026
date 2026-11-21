@@ -122,7 +122,9 @@ function covered(pack: InstitutionCasePack, alert: BankAlert, txs: readonly Bank
   }
 }
 
-const isCrypto = (tx: BankTransaction) => /\b(?:exchange|crypto|coin\w*)\b/i.test(tx.counterparty_name ?? "");
+/** A crypto purchase, recognised from the payee's name or from a payment reference naming a crypto asset. */
+const isCrypto = (tx: BankTransaction) => /\b(?:exchange|crypto\w*|coin\w*|digital assets?|digital currenc\w*|blockchain|tokens?)\b/i.test(tx.counterparty_name ?? "")
+  || /\b(?:btc|eth|usdt|usdc|bitcoin|ethereum|crypto\w*|stablecoin\w*)\b/i.test(typeof tx.reference === "string" ? tx.reference : "");
 const abroad = (tx: BankTransaction) => !!tx.counterparty_country && norm(String(tx.counterparty_country)) !== "united kingdom";
 
 /** Unexplained rapid movement escalates only on a concrete pattern; otherwise one request can settle it. */

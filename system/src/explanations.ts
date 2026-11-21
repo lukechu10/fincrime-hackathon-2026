@@ -24,7 +24,8 @@ export interface Explanation {
 
 export interface ExplanationIndex {
   readonly byTx: ReadonlyMap<string, Explanation>;
-  readonly invoicePayeeConflicts: readonly { tx: BankTransaction; doc: EvidenceDocument; payee: string }[];
+  /** Invoices that name the case payment yet contradict it: a different beneficiary or a different amount. */
+  readonly invoicePayeeConflicts: readonly { tx: BankTransaction; doc: EvidenceDocument; detail: string }[];
   /** Payments/FX: client funding whose onward payment is not documented, keyed by the funding transaction. */
   readonly unexplainedOnward: ReadonlyMap<string, BankTransaction>;
 }
@@ -87,7 +88,9 @@ function ownAccount(ctx: Context, add: Add): void {
       const heldBy = [...md.matchAll(/Account (.+?) is held by (.+?)\.(?:\s|$)/g)]
         .some((m) => sameName(m[2], ctx.name) && sameAccount(m[1], tx.counterparty_account));
       const account = field(md, "Account");
-      const named = !tx.counterparty_name || sameName(tx.counterparty_name, ctx.name) || sameName(tx.counterparty_name, accountName);
+      // A joint account may be named after the other holder; the statement still shows the customer holds it.
+      const named = !tx.counterparty_name || sameName(tx.counterparty_name, ctx.name) || sameName(tx.counterparty_name, accountName)
+        || (isHolder && holders.some((h) => sameName(h, tx.counterparty_name)));
       const ok = (heldBy && moved)
         || (isHolder && named && sameAccount(account, tx.counterparty_account)
           && (!/ending/i.test(account ?? "") || moved));
@@ -101,7 +104,7 @@ function ownAccount(ctx: Context, add: Add): void {
 
 function invoices(ctx: Context, add: Add): ExplanationIndex["invoicePayeeConflicts"] {
   const matches: { doc: EvidenceDocument; tx: BankTransaction; ref?: string }[] = [];
-  const conflicts: { doc: EvidenceDocument; tx: BankTransaction; payee: string }[] = [];
+  const conflicts: { doc: EvidenceDocument; tx: BankTransaction; detail: string }[] = [];
   const docCounts = new Map<EvidenceDocument, number>();
   const txCounts = new Map<string, number>();
   const relevant = new Set(ctx.subjects.map((tx) => tx.transaction_id));
@@ -123,15 +126,22 @@ function invoices(ctx: Context, add: Add): ExplanationIndex["invoicePayeeConflic
     const accountOnly = payTo && /^(?:IBAN|account)\b/i.test(payTo);
     const payee = namedDestination ? namedDestination[1] : accountOnly ? undefined : payTo;
     const account = namedDestination ? namedDestination[2] : accountOnly ? payTo : undefined;
-    const ref = /\b(INV \d+|CARRIER \d+|PO \d+)\b/.exec(title(md))?.[1] ?? /\border (PO \d+)\b/i.exec(field(md, "Goods") ?? "")?.[1];
+    const ref = /\b(INV \d+|CARRIER \d+|PO \d+)\b/.exec(title(md))?.[1] ?? /\border (PO \d+)\b/i.exec(field(md, "Goods") ?? "")?.[1]
+      ?? field(md, "Invoice number");
     if (!issuers.length && !payee) continue;
     // Include earlier movements when deciding whether a single invoice supports a unique payment.
     for (const tx of ctx.history) {
+      // The payment quotes this invoice and goes to its issuer, but for a different amount: the invoice does not support it.
+      if (tx.direction === "out" && ref && refHas(tx, ref) && relevant.has(tx.transaction_id) && !samePence(tx, amount)
+        && recentBefore(doc, tx, 60) && issuers.length > 0 && issuers.every((issuer) => sameName(tx.counterparty_name, issuer))) {
+        conflicts.push({ doc, tx, detail: `bills ${amounts[0]} under ${ref}` });
+        continue;
+      }
       if (tx.direction !== "out" || !samePence(tx, amount) || !recentBefore(doc, tx, 60)
         || issuers.some((issuer) => !sameName(tx.counterparty_name, issuer)) || (ref && !refHas(tx, ref))) continue;
       const accountMatches = !!account && sameAccount(account, tx.counterparty_account);
       if (payee && !sameName(payee, tx.counterparty_name)) {
-        if (relevant.has(tx.transaction_id) && (ref || accountMatches)) conflicts.push({ doc, tx, payee });
+        if (relevant.has(tx.transaction_id) && (ref || accountMatches)) conflicts.push({ doc, tx, detail: `names ${label(payee)} as the payment beneficiary` });
         continue;
       }
       if (account && !accountMatches) continue;

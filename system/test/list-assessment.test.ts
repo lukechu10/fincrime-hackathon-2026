@@ -94,9 +94,17 @@ test("treats the start date as inclusive and the cessation date as exclusive", (
   }
 });
 
-test("does not backdate a control row without a notified date", () => {
+test("does not backdate a control row without a notified date, but an open role continues after the snapshot", () => {
   const controller = controlRegister("", "");
   assert.equal(assessListMatch(match, [person], [controller], [payment("2026-07-31")]).status, "unresolved");
   assert.equal(assessListMatch(match, [person], [controller], [payment("2026-08-01")]).status, "confirmed");
-  assert.equal(assessListMatch(match, [person], [controller], [payment("2026-08-02")]).status, "unresolved");
+  // Nothing on the register ends the control, so a payment after the snapshot date is still to a controlled payee.
+  assert.equal(assessListMatch(match, [person], [controller], [payment("2026-08-02")]).status, "confirmed");
+});
+
+test("a dated appointment with no resignation still counts for a payment after the register was produced", () => {
+  const doc = register("REG-OPEN", "Example Trading Ltd", "April 1980");
+  assert.equal(assessListMatch({ measured: { list_entry: "LIST-1" } }, [person], [doc], [payment("2026-08-20")]).status, "confirmed");
+  const ended = register("REG-ENDED", "Example Trading Ltd", "April 1980", "15 August 2026");
+  assert.equal(assessListMatch({ measured: { list_entry: "LIST-1" } }, [person], [ended], [payment("2026-08-20")]).status, "unresolved");
 });

@@ -62,10 +62,11 @@ function roleDates(entry: EvidenceEntry) {
 function hasActiveRole(entry: EvidenceEntry, doc: EvidenceDocument, paymentDate: string): boolean {
   const { starts, ends } = roleDates(entry);
   if (starts.length > 1 || ends.length > 1) return false;
-  // Start is inclusive; the ceased/resigned date is exclusive. Missing bounds establish
-  // no activity beyond the snapshot on the unknown side of the interval.
+  // Start is inclusive; the ceased/resigned date is exclusive. A missing start is not backdated before the
+  // snapshot. A role with no end date was current when the register was produced and is taken to continue
+  // until a register shows it ended; the snapshot date is not an end date.
   const start = starts[0] ?? doc.metadata.dated;
-  return start <= paymentDate && (ends[0] ? paymentDate < ends[0] : paymentDate <= doc.metadata.dated);
+  return start <= paymentDate && (!ends[0] || paymentDate < ends[0]);
 }
 
 function companyName(doc: EvidenceDocument): string | undefined {
