@@ -47,8 +47,8 @@ for (const institution of ["bank", "emoney", "investment", "payments_fx"] as con
     assert.deepEqual(result.alert_ids, ["AL-1"]);
     assert.equal(result.verdict, "RFI");
     assert.deepEqual(result.evidence, ["TX-1"]);
-    if (institution === "payments_fx") assert.match(result.reason, /requires an invoice or contract before release/);
-    else assert.match(result.reason, /source-of-funds record/);
+    if (institution === "payments_fx") assert.match(result.reason, /no invoice or contract on file supports it/);
+    else assert.match(result.reason, /where the money for .* came from/);
   });
 }
 

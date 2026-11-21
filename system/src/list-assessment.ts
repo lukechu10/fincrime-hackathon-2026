@@ -1,6 +1,7 @@
 import type { BankTransaction } from "./bank-cases.js";
 import type { EvidenceDocument } from "./evidence.js";
 import type { EvidenceEntry, EvidenceFact } from "./evidence-extraction.js";
+import { giftLetter } from "./explanations.js";
 
 export interface ListAssessment {
   status: "confirmed" | "different" | "unresolved";
@@ -233,6 +234,26 @@ function assessTransaction(listed: ListEntry, matchedOn: unknown, documents: rea
       const controller = factIn(controllingOwner, "person")[0];
       return { status: "different", evidence: [...baseEvidence, doc.metadata.doc_id],
         detail: `Register ${doc.metadata.doc_id} locates ${companyName(doc)} at Unit ${unit[1]}, not the listed Unit ${listedUnit[1]}, and records ${controller} as holding at least 75% of its shares` };
+    }
+  }
+
+  // A signed letter from the counterparty that states their full date of birth is identity evidence
+  // for that individual; compare it with the full listed date, not just month and year.
+  const listedDay = typeof listed.date_of_birth === "string" && /^\d{4}-\d{2}-\d{2}$/.test(listed.date_of_birth) ? listed.date_of_birth : undefined;
+  if (!relevantRows.length && listedDay && tx.counterparty_name && normalizedName(tx.counterparty_name) === listedName) {
+    const letters = documents.flatMap((doc) => {
+      const gift = giftLetter(doc);
+      return gift?.born && normalizedName(gift.donor) === listedName && doc.metadata.dated <= paymentDate ? [{ doc, born: gift.born }] : [];
+    });
+    const births = new Set(letters.map((letter) => letter.born));
+    if (births.size === 1) {
+      const [{ doc, born }] = letters;
+      const ids = letters.map((letter) => letter.doc.metadata.doc_id);
+      return born === listedDay
+        ? { status: "confirmed", evidence: [...baseEvidence, ...ids],
+          detail: `${doc.metadata.doc_id} is signed by ${listed.name}, born ${born}, the same full date of birth as list entry ${listed.entry_id}, who paid the flagged funds on ${paymentDate}` }
+        : { status: "different", evidence: [...baseEvidence, ...ids],
+          detail: `${doc.metadata.doc_id} is signed by the payer ${listed.name}, born ${born}, whereas list entry ${listed.entry_id} records ${listedDay}; the shared name does not identify the listed person` };
     }
   }
 

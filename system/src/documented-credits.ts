@@ -39,15 +39,27 @@ function terms(doc: EvidenceDocument, customerName: string): CreditTerms | undef
   if (doc.metadata.type === "insurer_letter") {
     const issuer = /^# Claim settlement letter from (.+)$/im.exec(markdown)?.[1]?.trim();
     const salutation = /^Dear[ \t]+(.+?),[ \t]*$/im.exec(markdown)?.[1];
-    const beneficiary = /\bto[ \t]+([^\n.,]+?)[ \t]+(?:via|by)[ \t]+bank transfer\b/i.exec(markdown)?.[1];
-    const addressed = salutation && normalize(salutation) === normalize(customerName);
-    const namedBeneficiary = beneficiary && normalize(beneficiary) === normalize(customerName);
+    // Payee phrasings: "to X by bank transfer", "issued to X", "payment of £n to X.", "paid directly to X".
+    // Take the text after the last "to" before the delimiter; "the bank account on file" names no payee.
+    const recipient = String.raw`((?:(?!\bto\b)[^\n.,*])+?)`;
+    const payees = [...new Set([
+      new RegExp(String.raw`\bto[ \t]+${recipient}[ \t]+(?:via|by)[ \t]+bank transfer\b`, "gi"),
+      new RegExp(String.raw`\bbank transfer[ \t]+(?:directly[ \t]+)?to[ \t]+${recipient}[.,]`, "gi"),
+      new RegExp(String.raw`\b(?:issued|paid|transferred|remitted)(?:[ \t]+directly)?[ \t]+to[ \t]+${recipient}(?:[ \t]+(?:by|via)\b|[.,])`, "gi"),
+      new RegExp(String.raw`\bpayment of \**£[\d,.]+\**[ \t]+to[ \t]+${recipient}(?:[ \t]+(?:by|via)\b|[.,])`, "gi"),
+    ].flatMap((pattern) => [...markdown.matchAll(pattern)].map((match) => normalize(match[1])))
+      .filter((name) => !/^(?:the|a|an|our)\b/.test(name)))];
+    // Every named payee must be the customer ("you" and "your account" are the addressee).
+    const payeesOk = payees.every((payee) => /^(?:you|your(?: nominated)? (?:bank )?account)$/.test(payee) || payee === normalize(customerName));
+    const genericSalutation = !salutation || /^(?:sir|madam|sir\/madam|customer|client|policyholder)$/i.test(salutation.trim());
+    const addressed = salutation ? normalize(salutation) === normalize(customerName) : false;
+    const named = payees.some((payee) => payee === normalize(customerName));
     const reference = refMatches(markdown, "claim");
     const amount = oneAmount(markdown);
-    const accepted = /\b(?:accepted your claim|your claim[^.\n]{0,100}has been accepted)\b/i.test(markdown);
-    const disputed = /\b(?:not (?:yet )?accepted|declined|rejected|not approved|subject to approval|pending|provisional|partial|cannot confirm|can['’]t confirm|unable to confirm|will not pay|under review)\b/i.test(markdown);
-    if (issuer && reference && amount && accepted && !disputed && (addressed || namedBeneficiary)
-      && (!beneficiary || /^(?:you|your account)$/i.test(beneficiary) || namedBeneficiary)) {
+    const accepted = /\b(?:accepted|approved)\b/i.test(markdown);
+    const disputed = /\b(?:not (?:yet )?(?:been )?(?:accepted|approved)|declined|rejected|subject to approval|pending|provisional|partial|cannot confirm|can['’]t confirm|unable to confirm|will not pay|under review|withheld|on hold)\b/i.test(markdown);
+    // The letter must be to the customer: addressed by name, naming them as payee, or with no other addressee.
+    if (issuer && reference && amount && accepted && !disputed && payeesOk && (addressed || named || genericSalutation)) {
       return { kind: "insurance_payout", party: issuer, amount, reference };
     }
   }
@@ -55,7 +67,7 @@ function terms(doc: EvidenceDocument, customerName: string): CreditTerms | undef
     const issuer = /^# Email from (.+)$/im.exec(markdown)?.[1]?.trim();
     const reference = refMatches(markdown, "booking");
     const amount = oneAmount(markdown);
-    if (issuer && reference && amount && /\bcancell?ation\b|\bcancell?ed\b/i.test(markdown) && /\brefund\b/i.test(markdown)
+    if (issuer && reference && amount && /\bcancel/i.test(markdown) && /\brefund\b/i.test(markdown)
       && !/\b(?:no refund|not refunded|non.refundable|not refunding|unable to refund|partial refund|refund (?:is )?(?:declined|denied|not due|not issued)|will not (?:be )?refund|forfeited|retained)\b/i.test(markdown)) {
       return { kind: "refund", party: issuer, amount, reference };
     }

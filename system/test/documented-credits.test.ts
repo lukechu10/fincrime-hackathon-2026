@@ -136,5 +136,5 @@ test("reconciling an incoming credit does not release an undocumented held FX pa
   const held = { ...original, transaction_id: "HELD", amount_gbp: 10000, booked_at: "2026-10-06T13:00:00Z" };
   const result = decideCase({ ...input, heldPayment: held, caseRecord: { ...input.caseRecord, institution: "payments_fx", held_payment_id: "HELD" } });
   assert.equal(result.verdict, "RFI");
-  assert.match(result.reason, /requires an invoice or contract before release/);
+  assert.match(result.reason, /no invoice or contract on file supports it/);
 });

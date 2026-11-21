@@ -16,14 +16,56 @@ The output directory must already exist. The runner writes exactly one JSON line
 
 ## How it decides
 
-This is a deterministic baseline, not a model. It treats alerts as already raised and does not rerun all of the upstream monitoring thresholds. It joins each case to its customer, flagged transactions, evidence documents, and relevant list entries. It evaluates each alert, with a separate release check when there is a held payments/FX payment. It uses structured invoice, bank statement, and register facts alongside selected raw document signals. It also reconciles recognized insurance settlements and full refunds documented by a venue email or supplier credit note. These require an exact amount, counterparty and claim or booking reference; refunds also require and cite a unique original payment, even if it predates the review window.
+The runner is deterministic and makes no model calls. It treats alerts as already raised; it does not rerun the upstream monitoring thresholds. The same code serves all four institutions, and institution differences come from the data and the SOP settings: thresholds in the alert measurements, the payments/FX held-payment release gate, and own-name funding being normal at payments/FX. Each case runs in four steps.
 
-- **Escalate** on a current sending-bank fraud report, a corroborated internal-list match, selected adverse notes, or unexplained linked flows and gaps that cannot be settled by one request. For list matches, officer and control records are evaluated on the matched transaction date, using their appointment or notification and resignation or cessation dates. A resignation does not end a separately documented period of significant control. Suspicion takes precedence over any otherwise reassuring match.
-- **Close** only on supported explanations for every alert. Implemented positive checks cover documented own accounts, exact invoice reconciliation for selected outgoing alert types, documented insurance payouts and linked refunds, and affirmative evidence distinguishing an internal-list match. An invoice alone does not clear a list match. Own-account activity at **5× or more** of the declared monthly baseline goes to RFI instead.
-- **Request information** when one request could resolve the outstanding gap, such as proof of the source of a flagged deposit or documentation for a held payment. A documented own-account transfer is exempt from the **£10,000** payments/FX release gate; otherwise the baseline does not release a held payment at that amount or above without a reconciled invoice. Unsupported contract formats stay under review rather than being treated as verified.
-- Output reasons use the facts and original document, transaction, and list entry IDs relied on. Past verdicts do not automatically clear new activity. The baseline does not interpret arbitrary free-form evidence or implement every closure scenario in the SOPs, so conservative decisions are expected where the evidence cannot be reconciled.
+1. **Explain transactions** ([`explanations.ts`](src/explanations.ts)). Each recognized document is checked against the case's transactions. Every check must hold: party names, exact amount in pence, account number (full or the same masked suffix), reference, and a document date shortly before the payment. Recognized document types:
+   - Bank statements, including joint accounts and "Account … is held by" lines (`OWN_ACCOUNT`).
+   - Invoices, dealer, hospital, carrier and pro forma invoices, contract payment schedules, contractor payment files and freight invoices (`INVOICE_MATCHES`).
+   - Insurance settlements, settlement, solicitor and estate letters, completion statements, private sale receipts, tenancy deposit letters and loan agreements (`DOCUMENTED_EVENT`).
+   - Gift letters and invoice-finance remittances (`THIRD_PARTY_DOCUMENTED`).
+   - Venue refunds, supplier credit notes and ISA cancellations, each linked to the original payment (`REFUND_OF_EARLIER_PAYMENT`).
+   - Group structure charts (`GROUP_COMPANY`).
+   - Group-trip booking confirmations (`COLLECTION_DOCUMENTED`).
+   - Takings books, car-park collection reports and event cash reconciliations (`BUSINESS_RECORDS_RECONCILE`).
+   - Declared payroll, payees paid at least twice before the window, and a cash re-deposit that matches an earlier reviewed withdrawal (`WITHIN_PROFILE`).
 
-**Model:** none. **Cost:** US$0 per run. **Measured runtime:** 0.18–0.26 seconds for 200 development cases on this machine, measured across all four institutions using subsets with the same input layout. The full development outputs were byte-identical across five runs. Development cases are unlabeled, so this checks reproducibility and contract compliance, not verdict accuracy.
+   At payments/FX, routine own-name funding is normal. A large dedicated funding transfer counts as explained only when the payment it funded within three days is itself documented.
+2. **Look for suspicion** ([`signals.ts`](src/signals.ts)). Each of the following is a concrete signal:
+   - A current sending-bank fraud report.
+   - A staff note about staying under a threshold.
+   - A staff note recording a refusal to explain a higher-risk route.
+   - A device shared with other customers.
+   - A customer saying others use their account.
+   - A payer company dissolved before it paid.
+   - Payees controlled by the customer's own director.
+   - An invoice table that contradicts the payment it names.
+   - A payment file with many payees sharing a few addresses.
+3. **Assess each alert against its own rule.**
+   - **Internal-list matches (TM22)** use the list assessment. Registers are read on the transaction date, and a gift letter's stated date of birth counts as identity evidence.
+   - **Every other alert** is covered when what remains unexplained falls below that rule's own threshold:
+     - TM01: only the customer's own top-ups may remain, within the rule's multiple.
+     - TM02: the remaining unexplained inflow is below £2,000.
+     - TM04: the remaining counterparties are within the limit.
+     - TM06 and TM07: the remaining amount is below the limit.
+     - All other rules: nothing may remain.
+   - **When an alert is not covered,** it escalates only on a concrete pattern:
+     - Rapid movement on to crypto, individuals abroad or several unrelated people.
+     - Higher-risk-country payments with several unrelated individuals.
+     - Third-party payouts at investment.
+   - **Otherwise it becomes one specific request.** An unexplained outflow asks for purpose documents and an unexplained inflow for source of funds. Rule-specific requests cover cash records, counterparty details and reasons for early redemption.
+4. **Aggregate.**
+   - **Any suspicion wins:** escalate with fixed precedence: listed party, structuring, invoice mismatch, account misuse, early redemption, high-risk corridor, unexplained funds, mule activity, pass-through, then third-party funding.
+   - **Otherwise any gap gives one RFI:** the identity question comes first, then the payments/FX release gate, then purpose before source. Other requests are listed in the same reason.
+   - **Otherwise the case closes.** Own-account explanations go through the 5× rule first: activity at 5× or more of the declared monthly baseline gives `RFI_UPDATED_PROFILE`.
+   - **Payments/FX release gate:** a held payment of £10,000 or more to anyone other than the client needs a matched invoice or contract before it can close.
+
+Reasons name the decisive facts, amounts, counterparties and documents. Evidence lists only IDs that exist in the supplied files.
+
+**Model:** none. **Cost:** US$0 per run. **Measured runtime** on this machine with the bundled runner:
+- **200-case subsets** (bank, payments/FX): about 1.1 seconds each.
+- **Full 1,000-case files:** 1.6–3.5 seconds each.
+
+Outputs were byte-identical across five runs per institution, from `system/` with absolute paths and from the repository root. [`../labels/`](../labels/) holds our own reviewed judgments for the development cases and a scorer (`python labels/score.py`). They are not organizer labels, and the runner never reads them.
 
 ## Rebuild and regenerate
 
