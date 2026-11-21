@@ -276,8 +276,16 @@ export function decideCase(pack: InstitutionCasePack, findings: Findings = NO_FI
       const suspicion = rapidMovementSuspicion(pack, open);
       if (suspicion) { suspicions.push({ ...suspicion, rank: rankOf(suspicion.code) }); continue; }
       const incidental = incidentalEmoneyMovements(pack, relevant, open, explanations, isCrypto);
-      if (incidental) {
+      if (incidental?.status === "covered") {
         covers.push({ alert, code: closeCode(explanations), residualFact: incidental.fact, evidence: incidental.evidence, explanations });
+        continue;
+      }
+      if (incidental?.status === "unresolved") {
+        const leftover = incidental.residual.map((tx) => tx.channel === "cash_withdrawal"
+          ? `${gbp.format(tx.amount_gbp)} cash withdrawal on ${txDay(tx)} (${tx.transaction_id})` : describe(tx)).join("; ");
+        gaps.push({ code: "RFI_PURPOSE_DOCUMENTS", rank: GAP_ORDER.indexOf("TM02"), evidence: incidental.evidence,
+          fact: `${incidental.reconciled}, but the remaining activity above prior volume is unexplained: ${leftover}`,
+          request: `Ask ${label(customer.name)} for records showing the purpose of ${incidental.residual.length === 1 ? "that transaction" : "those transactions"} and whether ${incidental.residual.length === 1 ? "it was" : "they were"} linked to the reconciled flow` });
         continue;
       }
     }

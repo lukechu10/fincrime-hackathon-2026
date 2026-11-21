@@ -171,6 +171,45 @@ test("e-money TM02 separates a documented transfer from ordinary same-wallet act
   assert.equal(run({ docs: [source, destination, report] }).verdict, "ESCALATE");
 });
 
+test("e-money TM02 needs both recurring recipients and available separate funding above the channel baseline", () => {
+  const wallet = { account_id: "WALLET" };
+  const transfer = tx("IN", "in", 3100, "Robin Tester", { ...wallet, counterparty_account: "11-22-33 44556677", booked_at: "2026-09-10T10:00:00Z" });
+  const payout = tx("MAIN", "out", 3100, "Robin Tester", { ...wallet, counterparty_account: "11-22-33 11223344", booked_at: "2026-09-11T10:00:00Z" });
+  const topup = tx("TOPUP", "in", 100, "Robin Tester", { ...wallet, booked_at: "2026-09-09T10:00:00Z", reference: "TOP UP" });
+  const residual = tx("EXTRA", "out", 60, "Casey Fixture", { ...wallet, channel: "wallet_transfer", reference: "tickets" });
+  const unflaggedCard = tx("CARD", "out", 41, "Local Bakery", { ...wallet, channel: "card", booked_at: "2026-09-09T11:00:00Z" });
+  const prior = [tx("OLDER", "out", 35, "Casey Fixture", { ...wallet, channel: "wallet_transfer", booked_at: "2026-07-20T10:00:00Z" }),
+    tx("RECENT", "out", 30, "Casey Fixture", { ...wallet, channel: "wallet_transfer", booked_at: "2026-08-10T10:00:00Z" })];
+  const statement = (id: string, account: string) => doc(id, "bank_statement", `# Bank statement\n**Account holder:** Robin Tester\n**Account:** ${account}`);
+  const docs = [statement("SRC", "11-22-33 44556677"), statement("DST", "11-22-33 11223344")];
+  const run = (extra: BankTransaction, funding: BankTransaction[] = [topup], unflagged: BankTransaction[] = [], history = prior) => {
+    const flagged = [...funding, transfer, payout, extra];
+    return decide({ institution: "emoney", txs: [...flagged, ...unflagged], prior: history, alerts: [alert("A1", "TM02", flagged)], docs });
+  };
+  const close = run(residual);
+  assert.equal(close.reason_code, "OWN_ACCOUNT");
+  assert.match(close.reason, /£100\.00 in earlier own-name top-ups could cover/);
+  assert.deepEqual(new Set(close.evidence), new Set(["SRC", "DST", "IN", "MAIN", "EXTRA", "TOPUP", "OLDER", "RECENT"]));
+  const unknown = run({ ...residual, counterparty_name: "New Recipient" });
+  assert.equal(unknown.reason_code, "RFI_PURPOSE_DOCUMENTS");
+  assert.match(unknown.reason, /documented £3,100\.00 payout.*£60\.00 to New Recipient/);
+  assert.match(unknown.reason, /records showing the purpose of that transaction/);
+  assert.ok(unknown.evidence.includes("DST"));
+  assert.equal(run(residual, []).verdict, "RFI", "the documented funds cannot also fund the extra transfer");
+  assert.equal(run(residual, [{ ...topup, booked_at: "2026-09-12T12:00:00Z" }]).verdict, "RFI", "a later credit is not available");
+  assert.equal(run(residual, [topup], [unflaggedCard]).verdict, "RFI", "intervening debits consume the available funds");
+  assert.equal(run(residual, [topup], [{ ...unflaggedCard, amount_gbp: 41.001 }]).verdict, "RFI", "an invalid debit cannot be treated as free");
+  assert.equal(run({ ...residual, reference: "BTC PURCHASE" }).verdict, "RFI");
+  assert.equal(run({ ...residual, counterparty_account: "11-22-33 88776655" }).verdict, "RFI", "a new destination is not proven by name alone");
+  const maskedAccount = "account ending 6655";
+  const maskedHistory = prior.map((t, i) => ({ ...t, counterparty_account: maskedAccount,
+    booked_at: i === 0 ? "2026-08-21T10:00:00Z" : "2026-09-02T10:00:00Z" }));
+  assert.equal(run({ ...residual, counterparty_account: maskedAccount }, [topup], maskedHistory, []).verdict, "RFI",
+    "a shared account suffix does not identify a recurring recipient");
+  assert.equal(run(residual, [topup], [], [{ ...prior[0], booked_at: "2026-03-20T10:00:00Z" }, prior[1]]).verdict, "RFI",
+    "stale activity does not establish recurrence");
+});
+
 test("e-money TM02 still reconciles the booking or tenancy payment before treating a withdrawal as background", () => {
   const wallet = { account_id: "WALLET" };
   const cash = tx("CASH", "out", 65, null, { ...wallet, channel: "cash_withdrawal" });
