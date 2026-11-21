@@ -8,6 +8,7 @@
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "bank:routes": "tsx src/inspect-bank-routing.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
     "build": "tsc",
