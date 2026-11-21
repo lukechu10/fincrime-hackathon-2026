@@ -39,6 +39,7 @@ Run the npm commands below from `system/`. The dev command watches `system/src/i
 | `npm run typecheck` | Check TypeScript without writing build files |
 | `npm test` | Run the evidence extraction and loader tests (no dataset required) |
 | `npm run build` | Compile TypeScript into `dist/` |
+| `npm run build:run` | Type-check, then bundle `src/index.ts` into the self-contained `system/run` executable (Node shebang, no `node_modules` or `dist/` needed at run time). Commit the result. |
 | `npm start` | Run the compiled entry point after building |
 
 ## Evidence preprocessing

@@ -1,0 +1,4 @@
+#!/usr/bin/env node
+
+// src/index.ts
+console.log("FinCrime Hackathon \u2014 Track 1: Transaction monitoring");
