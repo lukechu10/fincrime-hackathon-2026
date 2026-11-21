@@ -82,16 +82,18 @@ Bank: current accounts with transfers, cards, branch/ATM cash. Payments/FX: busi
 
 | Rule | Bank | Payments/FX | E-money | Investment |
 | --- | --- | --- | --- | --- |
-| `TM01` Profile exceeded | 30-day inflows vs declared income/turnover | Funding vs expected payment volume | Inflows vs declared income/turnover | Deposits vs declared income |
-| `TM02` Rapid movement | In and out within 48h | Third-party funding paid out within 48h; exclude client own funding | In and out within 48h | Withdrawn within 10 days with little invested |
-| `TM03` Repeated subthreshold activity | Cash deposits just below £10,000 within 10 days | Payments to one beneficiary just below £10,000 within 10 days | Cash top-ups just below £1,000 within 10 days | — |
-| `TM04` Many payers/payees | Over six payers or payees in 30 days | Over 25 beneficiaries in 30 days | Over six payers or payees in 30 days | — |
-| `TM05` Large cash | Deposit/withdrawal of at least £10,000 | — | Top-up of at least £1,000 | — |
-| `TM06` Unexpected higher-risk country | Transfer origin or destination | Beneficiary country | Transfer origin or destination | Deposit origin or withdrawal destination |
-| `TM07` Dormant reactivation | Activity after 180 days dormant | Same | Same | Same |
-| `TM08` Third-party funding/payout | — | Funding from an account not in the client's name | — | Deposit from or withdrawal to another party |
+| `TM01` Profile exceeded | 30-day inflows > 3× declared monthly income (individual) or > 2× monthly turnover (business) | 30-day inflows > 2× the monthly share of declared annual payment volume | Same as Bank | Same as Bank (customers are individual investors) |
+| `TM02` Rapid movement | Over 10 days, ≥ 80% of ≥ £2,000 received is paid out within 48h; card spend excluded | Same as Bank, counting only money from anyone other than the client | Same as Bank | Over 10 days, ≥ 80% of ≥ £2,000 deposited is withdrawn within 10 days and < 20% of it was invested |
+| `TM03` Repeated subthreshold activity | 3+ cash deposits of £9,000.00–£9,999.99 within 10 days | 3+ payments to the same beneficiary of £9,000.00–£9,999.99 within 10 days | 4+ cash top-ups of £800.00–£999.99 within 10 days | — |
+| `TM04` Many payers/payees | > 6 payers or payees by bank transfer in 30 days | Client pays > 25 beneficiaries in 30 days | Same as Bank | — |
+| `TM05` Large cash | One cash deposit/withdrawal ≥ £10,000 (individual) or ≥ £25,000 (business) | — | One cash top-up ≥ £1,000 (individual) or ≥ £5,000 (business) | — |
+| `TM06` Unexpected higher-risk country | ≥ £5,000 within 30 days to or from an undeclared higher-risk country | Same | Same | Same |
+| `TM07` Dormant reactivation | ≥ £5,000 moves after 180 days with no activity | Same | Same | Same |
+| `TM08` Third-party funding/payout | — | Funding ≥ £1,000 from an account not in the client's name | — | Deposit ≥ £1,000 from, or withdrawal to, an account not in the customer's name |
 | `TM10` Early fund redemption | — | — | — | Fund units sold within 90 days of purchase |
-| `TM22` Internal-list match | Payer or recipient | Beneficiary or its officers | Payer or recipient | Depositor |
+| `TM22` Internal-list match | Payer, recipient or company officer matches by name, address, date of birth or identifier | Same | Same | Same |
+
+All four SOPs share the same verdict definitions, policy settings (higher-risk country list, 5× own-account rule, internal-list and prior-review handling) and reason codes. Payments/FX alone adds the £10,000 invoice-before-release rule and scopes a case to one held outgoing payment.
 
 ### Allowed reason codes
 
