@@ -1,6 +1,9 @@
 node_modules/
 dist/
-/data/track-1/
+/institutions/
+/DATASET.md
+/BRIEF.html
+/.track-1.*/
 .env
 .env.*
 !.env.example

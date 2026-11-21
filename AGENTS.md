@@ -4,13 +4,15 @@
 
 Build an evidence-first transaction-monitoring triage system for [Track 1: Stop suspicious payments](https://gb-fincrime-hackathon-11-2026.teamdeel.workers.dev/hackathon#track-1). The system plays the analyst: it reviews cases raised by existing monitoring rules, not a feed of raw transactions that it must flag from scratch. It recommends a disposition; it does not actually release payments, contact customers, or file reports. Escalations go to the Money Laundering Reporting Officer (MLRO), who decides whether to file a Suspicious Activity Report.
 
-Read the [full track brief](https://hosted-pages.godiligent.ai/hackathon-tm-track/) and the data bundle's README and four `POLICY.md` files before implementing decision logic. This file summarizes the brief; it is not a replacement for the institution-specific SOPs. The project uses Node.js 24+ and strict TypeScript with NodeNext/ESM. `src/index.ts` is a placeholder. `src/evidence.ts` indexes evidence metadata and lazily loads and extracts relevant Markdown with source provenance; see the project README for usage. The official development bundle is extracted locally under `data/track-1/` (ignored by Git); see the project README for the download link. The submission runner and decision engine are not implemented yet.
+Read the [full track brief](https://hosted-pages.godiligent.ai/hackathon-tm-track/), `DATASET.md`, and the four `institutions/*/POLICY.md` files before implementing decision logic. This file summarizes the brief; it is not a replacement for the institution-specific SOPs. The project uses Node.js 24+ and strict TypeScript with NodeNext/ESM. `system/src/index.ts` is a placeholder. `system/src/evidence.ts` indexes evidence metadata and lazily loads and extracts relevant Markdown with source provenance. Run `make dataset` to fetch the bundle to the repository root (`institutions/`, `DATASET.md`, and `BRIEF.html`, all ignored by Git). Keep submission code under `system/` and generated verdicts under `output/`. The submission runner and decision engine are not implemented yet.
 
 ```sh
+cd system
 npm ci
 npm run dev        # watch and run src/index.ts
 npm run typecheck  # no emitted files
-npm run build      # compile into dist/
+npm test           # evidence fixtures
+npm run build      # compile into system/dist/ (relative to the repo root)
 npm start          # run the compiled entry point
 ```
 
@@ -19,7 +21,7 @@ npm start          # run the compiled entry point
 Deliver `system/run` (executable), `system/README.md` (how to run it and how it decides), and four development output files: `output/bank.jsonl`, `output/emoney.jsonl`, `output/investment.jsonl`, and `output/payments_fx.jsonl`.
 
 ```sh
-system/run data/track-1/institutions/bank output/bank.jsonl
+system/run institutions/bank output/bank.jsonl
 # Evaluators also run from inside system/:
 ./run /absolute/path/to/bank /absolute/path/to/bank.jsonl
 ```
@@ -31,7 +33,7 @@ system/run data/track-1/institutions/bank output/bank.jsonl
 
 ### Inputs
 
-Under `data/track-1/`, the development bundle contains `README.md`, `BRIEF.html`, and `institutions/{bank,emoney,investment,payments_fx}/`. There are 4,000 development cases, 1,000 per institution, **without answer labels**. Each institution folder contains:
+At the repository root, the development bundle installs `DATASET.md` (the organizer's `README.md`), `BRIEF.html`, and `institutions/{bank,emoney,investment,payments_fx}/`. There are 4,000 development cases, 1,000 per institution, **without answer labels**. Each institution folder contains:
 
 | Input | Contents |
 | --- | --- |
