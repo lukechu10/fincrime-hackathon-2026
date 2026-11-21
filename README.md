@@ -28,5 +28,12 @@ The entry point is `src/index.ts`. The dev command reruns it when files change.
 | Command | Purpose |
 | --- | --- |
 | `npm run typecheck` | Check TypeScript without writing build files |
+| `npm test` | Run the evidence extraction and loader tests (no dataset required) |
 | `npm run build` | Compile TypeScript into `dist/` |
 | `npm start` | Run the compiled entry point after building |
+
+## Evidence preprocessing
+
+`src/evidence.ts` exposes `loadEvidenceIndex(institutionDir)`. Create one index per institution run. Use `metadataForCustomer(customerId)` to select candidate documents without opening them, then call `get(docId)` for the relevant IDs. Each document is read and parsed once per index, in memory; there is no separate JSON generation step.
+
+The returned document contains the original metadata and Markdown plus a JSON-serializable `extraction`: document-level `facts` and grouped `entries` (such as invoice rows, statement movements, and register officers). Each fact carries the document ID, line number, and original excerpt. Recognized GBP amounts use integer pence, and recognized full dates use `YYYY-MM-DD`. Notes, chats, and other unsupported document types remain available as raw Markdown. Extraction records what documents say; it does not establish a transaction match, prove a claim, or decide a verdict.
