@@ -1,3 +1,4 @@
+import type { BankTransaction } from "./bank-cases.js";
 import type { EvidenceDocument } from "./evidence.js";
 import type { EvidenceEntry, EvidenceFact } from "./evidence-extraction.js";
 
@@ -5,7 +6,10 @@ export interface ListAssessment {
   status: "confirmed" | "different" | "unresolved";
   evidence: string[];
   detail: string;
+  transactionId?: string;
 }
+
+type ListTransaction = Pick<BankTransaction, "transaction_id" | "counterparty_name" | "booked_at">;
 
 type ListEntry = {
   entry_id: string;
@@ -48,11 +52,19 @@ function factIn(entry: EvidenceEntry, field: EvidenceFact["field"]): string[] {
   return textFacts(entry.facts, field);
 }
 
-function hasActiveRole(entry: EvidenceEntry, doc: EvidenceDocument): boolean {
-  const endField = entry.kind === "companyOfficer" ? "resignedDate" : "ceasedDate";
-  const endDates = factIn(entry, endField);
-  // A role is current in this register snapshot if it has no end date, or ends after the snapshot.
-  return endDates.length === 0 || endDates.some((date) => date > doc.metadata.dated);
+function roleDates(entry: EvidenceEntry) {
+  const officer = entry.kind === "companyOfficer";
+  return { starts: factIn(entry, officer ? "appointedDate" : "notifiedDate"),
+    ends: factIn(entry, officer ? "resignedDate" : "ceasedDate") };
+}
+
+function hasActiveRole(entry: EvidenceEntry, doc: EvidenceDocument, paymentDate: string): boolean {
+  const { starts, ends } = roleDates(entry);
+  if (starts.length > 1 || ends.length > 1) return false;
+  // Start is inclusive; the ceased/resigned date is exclusive. Missing bounds establish
+  // no activity beyond the snapshot on the unknown side of the interval.
+  const start = starts[0] ?? doc.metadata.dated;
+  return start <= paymentDate && (ends[0] ? paymentDate < ends[0] : paymentDate <= doc.metadata.dated);
 }
 
 function companyName(doc: EvidenceDocument): string | undefined {
@@ -103,7 +115,7 @@ export function assessListMatch(
   alert: { measured?: unknown },
   entries: readonly ListEntry[],
   documents: readonly EvidenceDocument[],
-  counterpartyNames: readonly string[],
+  transactions: readonly ListTransaction[],
 ): ListAssessment {
   const measured = record(alert.measured);
   const selectedId = measured?.list_entry;
@@ -115,8 +127,23 @@ export function assessListMatch(
     return { status: "unresolved", evidence: [], detail: `The alert selects list entry ${selectedId}, but that entry is not present in the supplied list.` };
   }
 
+  const results = transactions.map((tx) => ({
+    ...assessTransaction(listed, measured?.matched_on, documents, tx), transactionId: tx.transaction_id,
+  }));
+  const confirmed = results.find((result) => result.status === "confirmed");
+  if (confirmed) return confirmed;
+  if (results.length && results.every((result) => result.status === "different")) {
+    return { ...results[0], evidence: [...new Set(results.flatMap((result) => result.evidence))] };
+  }
+  return results.find((result) => result.status === "unresolved") ?? {
+    status: "unresolved", evidence: [listed.entry_id], detail: `The selected list entry is ${listed.name}, but no flagged transaction is available to assess.`,
+  };
+}
+
+function assessTransaction(listed: ListEntry, matchedOn: unknown, documents: readonly EvidenceDocument[], tx: ListTransaction): ListAssessment {
   const baseEvidence = [listed.entry_id];
-  const counterpartySet = new Set(counterpartyNames.filter((name) => typeof name === "string").map(normalizedName));
+  const paymentDate = tx.booked_at.slice(0, 10);
+  const counterpartySet = new Set(tx.counterparty_name ? [normalizedName(tx.counterparty_name)] : []);
   const registers = documents.filter((doc) => relevantRegister(doc, counterpartySet));
 
   // Company identifiers are useful only when the list entry actually supplies one.
@@ -150,7 +177,7 @@ export function assessListMatch(
       const person = factIn(row, "person").find((value) => normalizedName(value) === listedName);
       if (!person) continue;
       const born = factIn(row, "birthDetail");
-      relevantRows.push({ doc, entry: row, person, born, active: hasActiveRole(row, doc) });
+      relevantRows.push({ doc, entry: row, person, born, active: hasActiveRole(row, doc, paymentDate) });
     }
   }
 
@@ -172,10 +199,13 @@ export function assessListMatch(
     };
   }
   if (corroborating.length > 0) {
-    const docs = [...new Set(corroborating.map((row) => row.doc.metadata.doc_id))];
+    const { doc, entry } = corroborating.find((row) => row.entry.kind === "significantControl") ?? corroborating[0];
+    const { ends } = roleDates(entry);
+    const role = entry.kind === "significantControl" ? "significant control" : "an active officer role";
+    const until = ends[0] ? ` (ending on ${ends[0]})` : "";
     return {
-      status: "confirmed", evidence: [...baseEvidence, ...docs],
-      detail: `The parsed register for the named counterparty records ${listed.name} with a month and year of birth matching the selected list entry, and shows an active officer role or significant control in the register snapshot. This independently corroborates the match.`,
+      status: "confirmed", evidence: [...baseEvidence, doc.metadata.doc_id],
+      detail: `Register ${doc.metadata.doc_id} matches ${listed.name}'s birth month and year to list entry ${listed.entry_id} and shows ${role} on the transaction date ${paymentDate}${until}`,
     };
   }
   if (conflicting.length > 0) {
@@ -188,7 +218,6 @@ export function assessListMatch(
 
   // An adjacent unit is not the same premises. Require independent, positive evidence
   // of a different controlling owner as well as the distinct unit, not merely a name mismatch.
-  const matchedOn = measured?.matched_on;
   const listedUnit = typeof listed.address === "string" ? /^unit\s+([a-z0-9-]+)\s*,?\s+(.+)/i.exec(listed.address.trim()) : null;
   if (typeof matchedOn === "string" && /^registered address\b/i.test(matchedOn) && listedUnit && !relevantRows.length) {
     for (const doc of registers) {
@@ -197,7 +226,7 @@ export function assessListMatch(
       const unit = /^unit\s+([a-z0-9-]+)\s*,?\s+(.+)/i.exec(office[0]);
       if (!unit || unit[1].toLowerCase() === listedUnit[1].toLowerCase()
         || normalizedName(unit[2]) !== normalizedName(listedUnit[2])) continue;
-      const controllingOwner = doc.extraction.entries.find((row) => row.kind === "significantControl" && hasActiveRole(row, doc)
+      const controllingOwner = doc.extraction.entries.find((row) => row.kind === "significantControl" && hasActiveRole(row, doc, paymentDate)
         && factIn(row, "person").some((name) => normalizedName(name) !== listedName)
         && factIn(row, "control").some((description) => /\b75% or more of (?:the )?shares\b/i.test(description)));
       if (!controllingOwner) continue;
@@ -218,7 +247,7 @@ export function assessListMatch(
     const docs = [...new Set(relevantRows.map((row) => row.doc.metadata.doc_id))];
     return {
       status: "unresolved", evidence: [...baseEvidence, ...docs],
-      detail: `A parsed register for the named counterparty contains ${listed.name}, but it does not establish a matching birth month and year in an active role or control record; the list match remains undecided.`,
+      detail: `A parsed register for the named counterparty contains ${listed.name}, but it does not establish a matching birth month and year in a role or control record active on ${paymentDate}; the list match remains undecided.`,
     };
   }
 

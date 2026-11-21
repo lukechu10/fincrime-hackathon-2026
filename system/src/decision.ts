@@ -91,22 +91,23 @@ export function decideCase(pack: InstitutionCasePack): CaseDecision {
       : `${alert.rule_id} flagged activity in ${label(customer.name)}'s ${caseRecord.review_window.from} to ${caseRecord.review_window.to} review`;
     const notes = currentDocs.filter((doc) => doc.metadata.type === "staff_note");
     if (alert.rule_id === "TM22") {
-      const assessment = assessListMatch({ measured: alert.measured }, pack.internalList, documents,
-        txs.flatMap((t) => t.counterparty_name ? [t.counterparty_name] : []));
-      const reliedOn = [...assessment.evidence, ...evidence];
+      const assessment = assessListMatch({ measured: alert.measured }, pack.internalList, documents, txs);
+      const assessedTx = txs.find((t) => t.transaction_id === assessment.transactionId) ?? tx;
+      const reliedOn = [...assessment.evidence, ...(assessedTx ? [assessedTx.transaction_id] : [])];
       if (assessment.status === "confirmed") {
+        const subject = assessedTx ? txText(assessedTx) : alert.alert_id;
         alertFindings.push(finding("ESCALATE", "ESC_LISTED_PARTY", assessment.detail,
-          `${trigger}; refer this match to the MLRO`, reliedOn));
+          `Refer the internal-list match for ${subject} to the MLRO`, reliedOn));
       } else if (assessment.status === "different") {
         // An identity mismatch explains TM22, not the commercial purpose of unrelated transfers.
         const invoices = txs.flatMap((t) => invoiceIds.get(t.transaction_id) ?? []);
         alertFindings.push(finding("CLOSE", "LIST_MATCH_DIFFERENT_PARTY", assessment.detail,
           `${trigger}${invoices.length ? `, and ${distinct(invoices).join(", ")} reconciles the flagged payment evidence` : ""}`,
-          [...reliedOn, ...invoices]));
+          [...reliedOn, ...alert.transaction_ids, ...invoices]));
       } else {
         alertFindings.push(finding("RFI", "RFI_COUNTERPARTY_DETAILS", assessment.detail,
-          `For ${tx ? txText(tx) : alert.alert_id}, ask for official identification of the matched counterparty or officer that distinguishes them from the listed party`,
-          reliedOn, `counterparty:${tx?.transaction_id ?? alert.alert_id}`));
+          `For ${assessedTx ? txText(assessedTx) : alert.alert_id}, ask for official identification of the matched counterparty or officer that distinguishes them from the listed party`,
+          reliedOn, `counterparty:${assessedTx?.transaction_id ?? alert.alert_id}`));
       }
       continue;
     }
