@@ -58,7 +58,7 @@ const registerTypes = new Set(["company_register_extract", "significant_control_
 const months = "January February March April May June July August September October November December".split(" ");
 const gbpNumber = String.raw`(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{2})?`;
 
-function parseGbp(text: string): Money | undefined {
+export function parseGbp(text: string): Money | undefined {
   const match = new RegExp(`^£\\s*(${gbpNumber})$`).exec(text);
   if (!match) return;
   const [pounds, pence = "00"] = match[1].replaceAll(",", "").split(".");

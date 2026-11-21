@@ -81,15 +81,15 @@ function parseDate(text2) {
   const date = /* @__PURE__ */ new Date(`${normalized}T00:00:00Z`);
   if (Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === normalized) return normalized;
 }
-function textFact(out, field, value, source) {
-  if (value && value !== "\u2014" && value !== "-") out.push({ field, value, source });
+function textFact(out, field2, value, source) {
+  if (value && value !== "\u2014" && value !== "-") out.push({ field: field2, value, source });
 }
-function dateFact(out, field, value, source) {
-  textFact(out, field, value && parseDate(value), source);
+function dateFact(out, field2, value, source) {
+  textFact(out, field2, value && parseDate(value), source);
 }
-function amountFact(out, field, value, source) {
+function amountFact(out, field2, value, source) {
   const normalized = value && parseGbp(value);
-  if (normalized) out.push({ field, value: normalized, source });
+  if (normalized) out.push({ field: field2, value: normalized, source });
 }
 function lookup(map, key) {
   return Object.hasOwn(map, key) ? map[key] : void 0;
@@ -156,10 +156,10 @@ function extractEvidence(docId, type, markdown) {
     headers = void 0;
     const heading = /^#\s+(.+)$/.exec(line);
     if (heading) textFact(facts, "title", heading[1], source);
-    const field = /^\*\*([^*]+):\*\*\s*(.+)$/.exec(line);
-    if (field) {
-      const label2 = field[1].toLowerCase();
-      const value = field[2];
+    const field2 = /^\*\*([^*]+):\*\*\s*(.+)$/.exec(line);
+    if (field2) {
+      const label2 = field2[1].toLowerCase();
+      const value = field2[2];
       if (label2 === "dated") dateFact(facts, "documentDate", value, source);
       if (kind === "invoice") {
         const textKey = lookup(invoiceFields, label2);
@@ -199,8 +199,8 @@ function isMetadata(value) {
   if (typeof value !== "object" || value === null) return false;
   const row = value;
   return ["doc_id", "customer_id", "type", "title", "dated", "file"].every((key) => {
-    const field = row[key];
-    return typeof field === "string" && field.trim().length > 0;
+    const field2 = row[key];
+    return typeof field2 === "string" && field2.trim().length > 0;
   });
 }
 function within(base, file) {
@@ -363,10 +363,13 @@ function loadCases(directory, bankDiagnostic) {
       throw new Error(`${caseId}: missing or unrelated held payment ${caseRecord.held_payment_id}`);
     }
     const { from, to } = caseRecord.review_window;
-    const windowTransactions = (txByCustomer.get(customer.customer_id) ?? []).filter((tx) => {
+    const priorTransactions = [];
+    const windowTransactions = [];
+    for (const tx of txByCustomer.get(customer.customer_id) ?? []) {
       const day = tx.booked_at.slice(0, 10);
-      return day >= from && day <= to;
-    });
+      if (day < from) priorTransactions.push(tx);
+      else if (day <= to) windowTransactions.push(tx);
+    }
     return {
       caseRecord,
       customer,
@@ -374,6 +377,7 @@ function loadCases(directory, bankDiagnostic) {
       flaggedTransactions: [...flagged.values()],
       documents: evidence.documentsForCustomer(customer.customer_id),
       windowTransactions,
+      priorTransactions,
       heldPayment,
       previousReviews: reviewsByCustomer.get(customer.customer_id) ?? [],
       internalList
@@ -403,11 +407,11 @@ function monthYear(value) {
   const index = months2.indexOf(match[1].toLowerCase());
   return index < 0 ? void 0 : `${match[2]}-${String(index + 1).padStart(2, "0")}`;
 }
-function textFacts(facts, field) {
-  return facts.filter((fact) => fact.field === field && typeof fact.value === "string").map((fact) => fact.value);
+function textFacts(facts, field2) {
+  return facts.filter((fact) => fact.field === field2 && typeof fact.value === "string").map((fact) => fact.value);
 }
-function factIn(entry, field) {
-  return textFacts(entry.facts, field);
+function factIn(entry, field2) {
+  return textFacts(entry.facts, field2);
 }
 function roleDates(entry) {
   const officer = entry.kind === "companyOfficer";
@@ -671,6 +675,106 @@ function ownedAccount(pack, tx) {
   }
 }
 
+// src/documented-credits.ts
+function one(items) {
+  return items.length === 1 ? items[0] : void 0;
+}
+function field(markdown, label2) {
+  return one([...markdown.matchAll(new RegExp(`^\\*\\*${label2}:\\*\\*[ \\t]*(.+)$`, "gim"))].map((match) => match[1].trim()));
+}
+function refMatches(text2, kind) {
+  const matches = [...text2.matchAll(new RegExp(`\\b${kind}[ \\t]+(?=[A-Z0-9-]*\\d)[A-Z0-9]+(?:-[A-Z0-9]+)*\\b`, "gi"))];
+  return one([...new Set(matches.map((m) => normalize(m[0])))]);
+}
+function oneAmount(text2) {
+  const amounts = [...text2.matchAll(/£[ \t]*[\d,]+(?:\.\d+)?/g)];
+  const amount = one(amounts);
+  return amount && parseGbp(amount[0])?.minorUnits;
+}
+function terms(doc, customerName) {
+  const { markdown } = doc;
+  if (doc.metadata.type === "insurer_letter") {
+    const issuer = /^# Claim settlement letter from (.+)$/im.exec(markdown)?.[1]?.trim();
+    const salutation = /^Dear[ \t]+(.+?),[ \t]*$/im.exec(markdown)?.[1];
+    const beneficiary = /\bto[ \t]+([^\n.,]+?)[ \t]+(?:via|by)[ \t]+bank transfer\b/i.exec(markdown)?.[1];
+    const addressed = salutation && normalize(salutation) === normalize(customerName);
+    const namedBeneficiary = beneficiary && normalize(beneficiary) === normalize(customerName);
+    const reference = refMatches(markdown, "claim");
+    const amount = oneAmount(markdown);
+    const accepted = /\b(?:accepted your claim|your claim[^.\n]{0,100}has been accepted)\b/i.test(markdown);
+    const disputed = /\b(?:not (?:yet )?accepted|declined|rejected|not approved|subject to approval|pending|provisional|partial|cannot confirm|can['’]t confirm|unable to confirm|will not pay|under review)\b/i.test(markdown);
+    if (issuer && reference && amount && accepted && !disputed && (addressed || namedBeneficiary) && (!beneficiary || /^(?:you|your account)$/i.test(beneficiary) || namedBeneficiary)) {
+      return { kind: "insurance_payout", party: issuer, amount, reference };
+    }
+  }
+  if (doc.metadata.type === "venue_email") {
+    const issuer = /^# Email from (.+)$/im.exec(markdown)?.[1]?.trim();
+    const reference = refMatches(markdown, "booking");
+    const amount = oneAmount(markdown);
+    if (issuer && reference && amount && /\bcancell?ation\b|\bcancell?ed\b/i.test(markdown) && /\brefund\b/i.test(markdown) && !/\b(?:no refund|not refunded|non.refundable|not refunding|unable to refund|partial refund|refund (?:is )?(?:declined|denied|not due|not issued)|will not (?:be )?refund|forfeited|retained)\b/i.test(markdown)) {
+      return { kind: "refund", party: issuer, amount, reference };
+    }
+  }
+  if (doc.metadata.type === "credit_note") {
+    const issuer = /^# Credit note from (.+)$/im.exec(markdown)?.[1]?.trim();
+    const supplier = field(markdown, "Supplier");
+    const customer = field(markdown, "Customer");
+    const cause = field(markdown, "Credit for");
+    const refund = field(markdown, "Refund");
+    const reference = cause && refMatches(cause, "booking");
+    const amount = refund && parseGbp(refund)?.minorUnits;
+    if (issuer && supplier && (normalize(supplier) === normalize(issuer) || normalize(supplier).startsWith(`${normalize(issuer)}, `)) && customer && normalize(customer) === normalize(customerName) && cause && /\bcancell?ed\b/i.test(cause) && !/\b(?:not|never)\s+cancell?ed\b/i.test(cause) && reference && amount) {
+      return { kind: "refund", party: issuer, amount, reference };
+    }
+  }
+}
+function mentions(text2, identifier) {
+  const literal = normalize(identifier).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![a-z0-9-])${literal}(?![a-z0-9-])`).test(normalize(text2));
+}
+function validDate(day) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return false;
+  const date = /* @__PURE__ */ new Date(`${day}T00:00:00Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === day;
+}
+var txReference = (tx) => typeof tx.reference === "string" ? normalize(tx.reference) : "";
+var namesParty = (tx, party) => !!tx.counterparty_name && normalize(tx.counterparty_name) === normalize(party);
+function originalPayment(credit, payment, dated, history) {
+  return one(history.filter((tx) => tx.direction === "out" && tx.customer_id === payment.customer_id && Date.parse(tx.booked_at) < Date.parse(payment.booked_at) && tx.booked_at.slice(0, 10) <= dated && txReference(tx) === credit.reference && minor(tx.amount_gbp) === credit.amount && namesParty(tx, credit.party) && tx.counterparty_country === payment.counterparty_country));
+}
+function documentedCredits(pack) {
+  const candidates = pack.documents.flatMap((doc) => {
+    const credit = doc.metadata.customer_id === pack.customer.customer_id ? terms(doc, pack.customer.name) : void 0;
+    return credit ? [{ doc, credit }] : [];
+  });
+  const byDocument = new Map(candidates.map(({ doc, credit }) => [doc, credit]));
+  const history = [...pack.priorTransactions, ...pack.windowTransactions].filter((tx) => tx.transaction_id !== pack.heldPayment?.transaction_id);
+  const matches = [];
+  for (const { doc, credit } of candidates) {
+    if (!validDate(doc.metadata.dated)) continue;
+    const unresolved = pack.documents.some((other) => {
+      if (other === doc || other.metadata.customer_id !== pack.customer.customer_id) return false;
+      if (mentions(other.markdown, doc.metadata.doc_id) && /\b(?:forged|altered|fabricat\w*|unverified|could not verify|suspicious)\b/i.test(other.markdown)) return true;
+      if (!mentions(other.markdown, credit.reference)) return false;
+      const terms2 = byDocument.get(other);
+      return !terms2 || terms2.kind !== credit.kind || terms2.reference !== credit.reference || terms2.amount !== credit.amount || normalize(terms2.party) !== normalize(credit.party);
+    });
+    if (unresolved) continue;
+    const reference = credit.kind === "refund" ? `refund ${credit.reference}` : credit.reference;
+    const payment = one(history.filter((tx) => tx.direction === "in" && tx.customer_id === pack.customer.customer_id && txReference(tx) === reference && minor(tx.amount_gbp) === credit.amount && namesParty(tx, credit.party)));
+    if (!payment) continue;
+    const day = payment.booked_at.slice(0, 10);
+    const { from, to } = pack.caseRecord.review_window;
+    if (day < from || day > to || doc.metadata.dated > day) continue;
+    const original = credit.kind === "refund" ? originalPayment(credit, payment, doc.metadata.dated, history) : void 0;
+    if (credit.kind === "refund" && !original) continue;
+    matches.push({ kind: credit.kind, reference: credit.reference.toUpperCase(), documentId: doc.metadata.doc_id, payment, original });
+  }
+  const counts = /* @__PURE__ */ new Map();
+  for (const { payment } of matches) counts.set(payment.transaction_id, (counts.get(payment.transaction_id) ?? 0) + 1);
+  return new Map(matches.filter(({ payment }) => counts.get(payment.transaction_id) === 1).map((match) => [match.payment.transaction_id, match]));
+}
+
 // src/decision.ts
 var reasonCodes = {
   CLOSE: [
@@ -725,6 +829,38 @@ function profile(pack, alert) {
   const total = typeof measuredReceived === "number" ? measuredReceived : incoming.reduce((sum, tx) => sum + (minor(tx.amount_gbp) ?? 0), 0) / 100;
   return { baseline, total, incoming };
 }
+var documentedCreditRules = /* @__PURE__ */ new Set(["TM01", "TM06", "TM07", "TM08"]);
+function isDeclaredPayroll(pack, tx) {
+  const employer = pack.customer.employer;
+  const source = record2(pack.customer.declared).source_of_funds;
+  return tx.direction === "in" && tx.channel === "bacs" && typeof source === "string" && normalize(source) === "salary" && typeof employer === "string" && !!employer.trim() && !!tx.counterparty_name && normalize(employer) === normalize(tx.counterparty_name) && typeof tx.reference === "string" && normalize(tx.reference) === `salary ${normalize(employer)}`;
+}
+function explainDocumentedCredit(pack, alert, txs, credits) {
+  if (!documentedCreditRules.has(alert.rule_id)) return;
+  const matches = txs.flatMap((tx) => credits.get(tx.transaction_id) ?? []);
+  if (!matches.length) return;
+  const unmatched = txs.filter((tx) => !credits.has(tx.transaction_id));
+  if (alert.rule_id === "TM01") {
+    const { total, baseline } = profile(pack, alert);
+    const amounts = txs.map((tx) => minor(tx.amount_gbp));
+    if (amounts.some((amount) => amount === void 0) || txs.some((tx) => tx.direction !== "in") || amounts.reduce((sum, amount) => sum + (amount ?? 0), 0) !== minor(total)) return;
+    if (unmatched.length && (unmatched.length !== 1 || !baseline || unmatched[0].amount_gbp >= 3 * baseline || !isDeclaredPayroll(pack, unmatched[0]))) return;
+  } else if (unmatched.length) {
+    return;
+  }
+  const facts = matches.map((match) => match.original ? `${match.documentId} records ${match.reference} and links the refund of ${txText(match.payment)} to the original payment of ${txText(match.original)}` : `${match.documentId} records ${match.reference} for ${label(pack.customer.name)} and matches the insurer credit of ${txText(match.payment)}`);
+  const code = matches.every((match) => match.kind === "refund") ? "REFUND_OF_EARLIER_PAYMENT" : "DOCUMENTED_EVENT";
+  return finding(
+    "CLOSE",
+    code,
+    facts.join("; "),
+    unmatched.length ? `The remaining flagged inflow for ${alert.rule_id} is declared payroll of ${txText(unmatched[0])}` : `The documented ${matches.length === 1 ? "credit explains" : "credits explain"} all the activity flagged by ${alert.rule_id}`,
+    [
+      ...matches.flatMap((match) => [match.documentId, match.payment.transaction_id, ...match.original ? [match.original.transaction_id] : []]),
+      ...unmatched.map((tx) => tx.transaction_id)
+    ]
+  );
+}
 var escalationByRule = {
   TM02: "ESC_PASS_THROUGH",
   TM06: "ESC_HIGH_RISK_CORRIDOR",
@@ -735,6 +871,7 @@ function decideCase(pack) {
   const all = new Map(pack.flaggedTransactions.map((tx) => [tx.transaction_id, tx]));
   if (heldPayment) all.set(heldPayment.transaction_id, heldPayment);
   const invoiceIds = matchedInvoices(pack, [...all.values()]);
+  const credits = documentedCredits(pack);
   const ownership = new Map([...all.values()].map((tx) => [tx.transaction_id, ownedAccount(pack, tx)]));
   const global = [];
   const alertFindings = [];
@@ -820,6 +957,11 @@ function decideCase(pack) {
         ));
         continue;
       }
+    }
+    const documented = explainDocumentedCredit(pack, alert, txs, credits);
+    if (documented) {
+      alertFindings.push(documented);
+      continue;
     }
     const own = txs.flatMap((t) => ownership.get(t.transaction_id) ?? []);
     const invoice = txs.flatMap((t) => invoiceIds.get(t.transaction_id) ?? []);
@@ -968,6 +1110,9 @@ function decideCase(pack) {
   if (primary.verdict !== "ESCALATE" && reliedOn.length > 1) {
     const other = reliedOn.find((f) => f !== primary && f.verdict === "CLOSE" && f.sentences[0] !== primary.sentences[0]);
     if (other) extra = ` ${other.sentences[0]}`;
+    else if (primary.verdict === "CLOSE" && (primary.code === "DOCUMENTED_EVENT" || primary.code === "REFUND_OF_EARLIER_PAYMENT")) {
+      extra = ` ${sentence(`The reconciled evidence covers ${distinct(alerts.map((alert) => alert.rule_id)).join(" and ")}`)}`;
+    }
   }
   return {
     case_id: caseRecord.case_id,
@@ -992,6 +1137,7 @@ function verify(pack, result) {
   const validEvidence = /* @__PURE__ */ new Set([
     ...pack.flaggedTransactions.map((row) => row.transaction_id),
     ...pack.windowTransactions.map((row) => row.transaction_id),
+    ...pack.priorTransactions.map((row) => row.transaction_id),
     ...pack.heldPayment ? [pack.heldPayment.transaction_id] : [],
     ...pack.documents.map((doc) => doc.metadata.doc_id),
     ...pack.internalList.map((row) => row.entry_id)

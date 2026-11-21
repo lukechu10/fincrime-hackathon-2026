@@ -1,5 +1,6 @@
 import type { BankAlert, BankTransaction, InstitutionCasePack } from "./bank-cases.js";
 import { assessListMatch } from "./list-assessment.js";
+import { documentedCredits, type DocumentedCredit } from "./documented-credits.js";
 import { matchedInvoices, minor, normalize, ownedAccount } from "./reconciliation.js";
 
 export const reasonCodes = {
@@ -56,6 +57,44 @@ function profile(pack: InstitutionCasePack, alert?: BankAlert) {
   return { baseline, total, incoming };
 }
 
+const documentedCreditRules = new Set(["TM01", "TM06", "TM07", "TM08"]);
+
+function isDeclaredPayroll(pack: InstitutionCasePack, tx: BankTransaction): boolean {
+  const employer = pack.customer.employer;
+  const source = record(pack.customer.declared).source_of_funds;
+  return tx.direction === "in" && tx.channel === "bacs" && typeof source === "string" && normalize(source) === "salary"
+    && typeof employer === "string" && !!employer.trim() && !!tx.counterparty_name
+    && normalize(employer) === normalize(tx.counterparty_name) && typeof tx.reference === "string"
+    && normalize(tx.reference) === `salary ${normalize(employer)}`;
+}
+
+function explainDocumentedCredit(pack: InstitutionCasePack, alert: BankAlert, txs: readonly BankTransaction[], credits: ReadonlyMap<string, DocumentedCredit>): Finding | undefined {
+  if (!documentedCreditRules.has(alert.rule_id)) return;
+  const matches = txs.flatMap((tx) => credits.get(tx.transaction_id) ?? []);
+  if (!matches.length) return;
+  const unmatched = txs.filter((tx) => !credits.has(tx.transaction_id));
+  if (alert.rule_id === "TM01") {
+    const { total, baseline } = profile(pack, alert);
+    const amounts = txs.map((tx) => minor(tx.amount_gbp));
+    if (amounts.some((amount) => amount === undefined) || txs.some((tx) => tx.direction !== "in")
+      || amounts.reduce<number>((sum, amount) => sum + (amount ?? 0), 0) !== minor(total)) return;
+    // Allow a single independently recognizable payroll credit, not an unexplained residual or an arbitrary same-name transfer.
+    if (unmatched.length && (unmatched.length !== 1 || !baseline || unmatched[0].amount_gbp >= 3 * baseline
+      || !isDeclaredPayroll(pack, unmatched[0]))) return;
+  } else if (unmatched.length) {
+    return;
+  }
+  const facts = matches.map((match) => match.original
+    ? `${match.documentId} records ${match.reference} and links the refund of ${txText(match.payment)} to the original payment of ${txText(match.original)}`
+    : `${match.documentId} records ${match.reference} for ${label(pack.customer.name)} and matches the insurer credit of ${txText(match.payment)}`);
+  const code = matches.every((match) => match.kind === "refund") ? "REFUND_OF_EARLIER_PAYMENT" : "DOCUMENTED_EVENT";
+  return finding("CLOSE", code, facts.join("; "), unmatched.length
+    ? `The remaining flagged inflow for ${alert.rule_id} is declared payroll of ${txText(unmatched[0])}`
+    : `The documented ${matches.length === 1 ? "credit explains" : "credits explain"} all the activity flagged by ${alert.rule_id}`,
+  [...matches.flatMap((match) => [match.documentId, match.payment.transaction_id, ...(match.original ? [match.original.transaction_id] : [])]),
+    ...unmatched.map((tx) => tx.transaction_id)]);
+}
+
 const escalationByRule: Readonly<Record<string, Code<"ESCALATE">>> = {
   TM02: "ESC_PASS_THROUGH", TM06: "ESC_HIGH_RISK_CORRIDOR", TM10: "ESC_EARLY_REDEMPTION",
 };
@@ -65,6 +104,7 @@ export function decideCase(pack: InstitutionCasePack): CaseDecision {
   const all = new Map(pack.flaggedTransactions.map((tx) => [tx.transaction_id, tx]));
   if (heldPayment) all.set(heldPayment.transaction_id, heldPayment);
   const invoiceIds = matchedInvoices(pack, [...all.values()]);
+  const credits = documentedCredits(pack);
   const ownership = new Map([...all.values()].map((tx) => [tx.transaction_id, ownedAccount(pack, tx)]));
   const global: Finding[] = [];
   const alertFindings: Finding[] = [];
@@ -127,6 +167,11 @@ export function decideCase(pack: InstitutionCasePack): CaseDecision {
           "Pass the unexplained higher-risk activity to the MLRO", [note.metadata.doc_id, ...evidence]));
         continue;
       }
+    }
+    const documented = explainDocumentedCredit(pack, alert, txs, credits);
+    if (documented) {
+      alertFindings.push(documented);
+      continue;
     }
     const own = txs.flatMap((t) => ownership.get(t.transaction_id) ?? []);
     const invoice = txs.flatMap((t) => invoiceIds.get(t.transaction_id) ?? []);
@@ -227,6 +272,9 @@ export function decideCase(pack: InstitutionCasePack): CaseDecision {
   if (primary.verdict !== "ESCALATE" && reliedOn.length > 1) {
     const other = reliedOn.find((f) => f !== primary && f.verdict === "CLOSE" && f.sentences[0] !== primary.sentences[0]);
     if (other) extra = ` ${other.sentences[0]}`;
+    else if (primary.verdict === "CLOSE" && (primary.code === "DOCUMENTED_EVENT" || primary.code === "REFUND_OF_EARLIER_PAYMENT")) {
+      extra = ` ${sentence(`The reconciled evidence covers ${distinct(alerts.map((alert) => alert.rule_id)).join(" and ")}`)}`;
+    }
   }
   return { case_id: caseRecord.case_id, alert_ids: caseRecord.alert_ids, verdict: primary.verdict, reason_code: primary.code,
     reason: primary.sentences.join(" ") + extra, evidence: distinct(reliedOn.flatMap((f) => f.evidence)) };

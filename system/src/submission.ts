@@ -16,6 +16,7 @@ function verify(pack: InstitutionCasePack, result: CaseDecision): void {
   const validEvidence = new Set([
     ...pack.flaggedTransactions.map((row) => row.transaction_id),
     ...pack.windowTransactions.map((row) => row.transaction_id),
+    ...pack.priorTransactions.map((row) => row.transaction_id),
     ...(pack.heldPayment ? [pack.heldPayment.transaction_id] : []),
     ...pack.documents.map((doc) => doc.metadata.doc_id),
     ...pack.internalList.map((row) => row.entry_id),

@@ -28,6 +28,8 @@ export interface BankCasePack {
 
 export interface InstitutionCasePack extends BankCasePack {
   readonly windowTransactions: readonly BankTransaction[];
+  /** Same-customer transactions before the review window, for proving specific historical links. */
+  readonly priorTransactions: readonly BankTransaction[];
   readonly internalList: readonly ListEntry[];
   readonly previousReviews: readonly PreviousReview[];
   readonly heldPayment?: BankTransaction;
@@ -144,12 +146,15 @@ function loadCases(directory: string, bankDiagnostic: boolean) {
       throw new Error(`${caseId}: missing or unrelated held payment ${caseRecord.held_payment_id}`);
     }
     const { from, to } = caseRecord.review_window;
-    const windowTransactions = (txByCustomer.get(customer.customer_id) ?? []).filter((tx) => {
+    const priorTransactions: BankTransaction[] = [];
+    const windowTransactions: BankTransaction[] = [];
+    for (const tx of txByCustomer.get(customer.customer_id) ?? []) {
       const day = tx.booked_at.slice(0, 10);
-      return day >= from && day <= to;
-    });
+      if (day < from) priorTransactions.push(tx);
+      else if (day <= to) windowTransactions.push(tx);
+    }
     return { caseRecord, customer, alerts: caseAlerts, flaggedTransactions: [...flagged.values()],
-      documents: evidence.documentsForCustomer(customer.customer_id), windowTransactions, heldPayment,
+      documents: evidence.documentsForCustomer(customer.customer_id), windowTransactions, priorTransactions, heldPayment,
       previousReviews: reviewsByCustomer.get(customer.customer_id) ?? [], internalList };
   }
 
