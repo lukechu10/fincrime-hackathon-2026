@@ -46,6 +46,7 @@ const SUSPICION_ORDER: readonly Code<"ESCALATE">[] = ["ESC_LISTED_PARTY", "ESC_S
 const GAP_ORDER = ["TM22", "RELEASE", "TM08", "TM02", "TM04", "TM03", "TM10", "TM06", "TM07", "TM05", "TM01", "PROFILE"];
 /** Close-code precedence: specific relationships before the explanation with the largest amount. */
 const CLOSE_OVERRIDES: readonly CloseCode[] = ["LIST_MATCH_DIFFERENT_PARTY", "RETURNING_CUSTOMER", "GROUP_COMPANY", "COLLECTION_DOCUMENTED", "REFUND_OF_EARLIER_PAYMENT"];
+const RELEASE_DOCUMENT_TYPES = new Set(["invoice", "supplier_invoice", "carrier_invoice", "dealer_invoice", "hospital_invoice", "contract_schedule"]);
 
 /** Card spending never counts as moving money on; household direct debits and standing orders are not the activity under review. */
 function material(alert: BankAlert, tx: BankTransaction): boolean {
@@ -106,9 +107,9 @@ function covered(pack: InstitutionCasePack, alert: BankAlert, txs: readonly Bank
       // An early redemption is explained only when the redemption itself is.
       return open.length === 0 && txs.some((tx) => tx.channel === "fund_redemption");
     case "TM02":
-      // Rapid movement is about where the money came from: the unexplained inflow must fall below the £2,000 floor.
-      // An explained payee alone does not explain third-party money passing through.
-      return sumPence(open.filter((tx) => tx.direction === "in")) < 200_000;
+      // The inflow floor does not explain the purpose of a flagged onward payment.
+      return !open.some((tx) => tx.direction === "out")
+        && sumPence(open.filter((tx) => tx.direction === "in")) < 200_000;
     case "TM04": {
       const limit = num(measured.limit) ?? 6;
       return new Set(open.map((tx) => nameKey(tx.counterparty_name ?? tx.transaction_id))).size <= limit;
@@ -140,7 +141,9 @@ function rapidMovementSuspicion(pack: InstitutionCasePack, open: readonly BankTr
   const where = crypto.length ? `to the crypto exchange ${label(out.counterparty_name ?? "")}` : overseasPeople.length
     ? `to an individual abroad` : `to ${individuals.size} unrelated individuals`;
   return { code, rank: 0, evidence: [...(inn ? [inn.transaction_id] : []), out.transaction_id],
-    fact: `${inn ? `${describe(inn)} was received and` : "Funds were"} moved on within days ${where}, including ${describe(out)}, with no document on file explaining either leg` };
+    fact: inn
+      ? `${describe(inn)} was received and funds moved on within days ${where}, including ${describe(out)}, with neither leg explained`
+      : `Funds moved on within days ${where}, including ${describe(out)}, and the onward payment has no credible explanation` };
 }
 
 function gapFor(pack: InstitutionCasePack, alert: BankAlert, open: readonly BankTransaction[], index: ExplanationIndex): Gap {
@@ -187,8 +190,13 @@ function gapFor(pack: InstitutionCasePack, alert: BankAlert, open: readonly Bank
     case "TM02": {
       const inn = largest(open.filter((tx) => tx.direction === "in"));
       const out = largest(open.filter((tx) => tx.direction === "out"));
+      if (out && !inn) {
+        return { code: "RFI_PURPOSE_DOCUMENTS", rank, evidence: open.filter((tx) => tx.direction === "out").map((tx) => tx.transaction_id),
+          fact: `${alert.rule_id} flagged rapid movement of funds, but the onward payment of ${describe(out)} is not explained`,
+          request: `Ask ${name} for the invoice, contract or transfer instruction supporting the unexplained onward payment${open.length === 1 ? "" : "s"}` };
+      }
       return { code: "RFI_PURPOSE_DOCUMENTS", rank, evidence: distinct([...(inn ? [inn.transaction_id] : []), ...(out ? [out.transaction_id] : [])]),
-        fact: `${alert.rule_id} flagged money moving through the account within days${inn ? `, including ${describe(inn)}` : ""}${out ? ` and ${describe(out)}` : ""}; no document on file explains it, though nothing suggests the money went to unrelated people, abroad or to crypto`,
+        fact: `${alert.rule_id} flagged money moving through the account within days${inn ? `, including ${describe(inn)}` : ""}${out ? ` and ${describe(out)}` : ""}; no document on file explains the unresolved activity`,
         request: `Ask ${name} for the documents behind ${inn ? "the incoming payment" : "the funds"}${out ? " and the onward payment, such as the agreement, letter or invoice for each" : ""}` };
     }
     case "TM04":
@@ -281,20 +289,35 @@ export function decideCase(pack: InstitutionCasePack): CaseDecision {
     gaps.push(gapFor(pack, alert, open, index));
   }
 
-  if (caseRecord.institution === "payments_fx" && heldPayment && heldPayment.amount_gbp >= 10_000 && !sameName(heldPayment.counterparty_name, customer.name)) {
+  let heldSupport: { tx: BankTransaction; explanation: Explanation } | undefined;
+  if (caseRecord.institution === "payments_fx" && heldPayment) {
     const support = index.byTx.get(heldPayment.transaction_id);
-    if (!support || !support.docs.length || !["INVOICE_MATCHES", "OWN_ACCOUNT"].includes(support.code)) {
+    const large = heldPayment.amount_gbp >= 10_000;
+    const owned = support?.code === "OWN_ACCOUNT" && support.docs.length > 0;
+    const evidencedPurpose = support?.code === "INVOICE_MATCHES" && documents.some((doc) =>
+      RELEASE_DOCUMENT_TYPES.has(doc.metadata.type) && support.docs.includes(doc.metadata.doc_id));
+    if (support && (!large || owned || evidencedPurpose)) {
+      heldSupport = { tx: heldPayment, explanation: support };
+    } else {
+      const payee = label(heldPayment.counterparty_name ?? "the beneficiary");
+      const ownName = sameName(heldPayment.counterparty_name, customer.name);
       gaps.push({ code: "RFI_PURPOSE_DOCUMENTS", rank: GAP_ORDER.indexOf("RELEASE"), evidence: [heldPayment.transaction_id],
-        fact: `The held payment of ${describe(heldPayment)} is £10,000 or more to a third party and no invoice or contract on file supports it`,
-        request: `Ask ${label(customer.name)} for the invoice or signed contract that names ${label(heldPayment.counterparty_name ?? "the beneficiary")} and supports the exact held amount before release` });
+        fact: `The held payment of ${describe(heldPayment)} ${ownName
+          ? "names the client but the destination account has not been shown to belong to them"
+          : large ? "is £10,000 or more and no invoice or contract on file supports it"
+            : "is not explained by the evidence on file"}`,
+        request: ownName
+          ? `Ask ${label(customer.name)} for a statement showing they hold the destination account for the exact held payment before release`
+          : `Ask ${label(customer.name)} for ${large ? "the invoice or signed contract" : "the invoice, contract or payment instruction"} that names ${payee} and supports the exact held amount before release` });
     }
   }
 
+  const items = covers.flatMap((cover) => cover.explanations);
+  if (heldSupport && !items.some(({ tx }) => tx.transaction_id === heldSupport.tx.transaction_id)) items.push(heldSupport);
   // The 5x rule applies when own-account transfers are what explains the activity.
-  const relyOnOwn = covers.some((cover) => cover.explanations.some((item) => item.explanation.code === "OWN_ACCOUNT" || item.explanation.ownFunds));
-  const ratio = relyOnOwn ? profileRatio(pack) : undefined;
+  const own = items.filter((item) => item.explanation.code === "OWN_ACCOUNT" || item.explanation.ownFunds);
+  const ratio = own.length ? profileRatio(pack) : undefined;
   if (ratio?.atLeastFive) {
-    const own = covers.flatMap((cover) => cover.explanations).filter((item) => item.explanation.code === "OWN_ACCOUNT" || item.explanation.ownFunds);
     gaps.push({ code: "RFI_UPDATED_PROFILE", rank: GAP_ORDER.indexOf("PROFILE"), evidence: distinct(own.flatMap((item) => [...item.explanation.docs, item.tx.transaction_id])),
       fact: `${own[0].explanation.fact}, but the activity is ${ratio.multiple.toFixed(2)} times ${label(customer.name)}'s declared monthly income or volume, at least the 5x limit`,
       request: `Ask ${label(customer.name)} for an updated expected monthly income or payment volume` });
@@ -325,7 +348,6 @@ export function decideCase(pack: InstitutionCasePack): CaseDecision {
     if (closed) reason.splice(1, 0, `${closed.fact ?? closed.explanations.find((item) => item.explanation.docs.length)!.explanation.fact}, which settles ${closed.alert.rule_id}`);
     evidence = distinct(ordered.flatMap((gap) => gap.evidence));
   } else {
-    const items = covers.flatMap((cover) => cover.explanations);
     const special = covers.find((cover) => cover.code === "LIST_MATCH_DIFFERENT_PARTY") ?? covers.find((cover) => cover.code === "RETURNING_CUSTOMER");
     const best = special?.code ?? closeCode(items);
     verdict = "CLOSE";
@@ -333,7 +355,7 @@ export function decideCase(pack: InstitutionCasePack): CaseDecision {
     const documented = distinct(items.filter((item) => item.explanation.code !== "WITHIN_PROFILE" || item.explanation.docs.length)
       .sort((a, b) => b.tx.amount_gbp - a.tx.amount_gbp).map((item) => item.explanation.fact));
     const lead = special?.fact;
-    const facts = distinct([...(lead ? [lead] : []), ...documented]).slice(0, 2);
+    const facts = distinct([...(lead ? [lead] : []), ...(heldSupport ? [heldSupport.explanation.fact] : []), ...documented]).slice(0, 2);
     reason = [...(facts.length ? facts : [`The flagged activity fits ${name}'s declared profile`]),
       `Together the evidence explains all the activity behind ${rules}${heldPayment ? ", so the held payment can be released" : ""}`];
     // Cite every explained transaction that coverage relied on, except routine own-name funding.

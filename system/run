@@ -396,54 +396,6 @@ function minor(amount) {
   const minor2 = parts && Number(parts[1] + (parts[2] ?? "").padEnd(2, "0"));
   return typeof minor2 === "number" && Number.isSafeInteger(minor2) ? minor2 : void 0;
 }
-var compactAccount = (s) => s.replace(/^account\s+/i, "").replace(/[ -]/g, "").toUpperCase();
-var fullAccount = (s) => /^(?:\d{14}|[A-Z]{2}\d{2}[A-Z\d]{11,30})$/.test(s);
-function oneText(facts, keys) {
-  const values = facts.filter((f) => keys.includes(f.field) && typeof f.value === "string").map((f) => f.value);
-  if (values.length === 1) return values[0];
-}
-function agreesWithDate(pack, doc, tx) {
-  const dated2 = oneText(doc.extraction.facts, ["documentDate"]);
-  const { from, to } = pack.caseRecord.review_window;
-  const day = tx.booked_at.slice(0, 10);
-  return !!dated2 && dated2 === doc.metadata.dated && from <= dated2 && dated2 <= day && day <= to;
-}
-function invoiceMatches(pack, doc, tx) {
-  if (doc.extraction.kind !== "invoice" || doc.extraction.entries.length || tx.direction !== "out" || !tx.counterparty_name || !agreesWithDate(pack, doc, tx)) return false;
-  const facts = doc.extraction.facts;
-  const payer = oneText(facts, ["billedTo", "buyer"]);
-  const payee = oneText(facts, ["payee"]);
-  const supplier = oneText(facts, ["supplier", "carrier"]);
-  const name = normalize(tx.counterparty_name);
-  const country = typeof tx.counterparty_country === "string" ? normalize(tx.counterparty_country) : "";
-  const samePayee = (value) => normalize(value) === name || !!country && normalize(value) === `${name}, ${country}`;
-  if (!payer || normalize(payer) !== normalize(pack.customer.name) || !payee && !supplier || payee && !samePayee(payee) || supplier && !samePayee(supplier)) return false;
-  const values = facts.filter((fact) => ["amountDue", "amount", "total"].includes(fact.field));
-  if (values.length !== 1 || typeof values[0].value === "string" || values[0].value.minorUnits <= 0 || values[0].value.minorUnits !== minor(tx.amount_gbp)) return false;
-  if (facts.some((fact) => fact.field === "terms" && typeof fact.value === "string" && /instal[l]?ment/i.test(fact.value))) return false;
-  const destinations = facts.filter((fact) => fact.field === "paymentDestination");
-  if (!destinations.length) return true;
-  if (destinations.length !== 1 || typeof destinations[0].value !== "string" || !tx.counterparty_account) return false;
-  const dest = compactAccount(destinations[0].value);
-  const account = compactAccount(tx.counterparty_account);
-  return fullAccount(dest) && dest === account;
-}
-function matchedInvoices(pack, transactions) {
-  const matches = [];
-  const documentCounts = /* @__PURE__ */ new Map();
-  const transactionCounts = /* @__PURE__ */ new Map();
-  for (const doc of pack.documents) {
-    if (doc.extraction.kind !== "invoice") continue;
-    for (const tx of transactions) {
-      if (!invoiceMatches(pack, doc, tx)) continue;
-      const id = doc.metadata.doc_id;
-      matches.push({ tx: tx.transaction_id, doc: id });
-      documentCounts.set(id, (documentCounts.get(id) ?? 0) + 1);
-      transactionCounts.set(tx.transaction_id, (transactionCounts.get(tx.transaction_id) ?? 0) + 1);
-    }
-  }
-  return new Map(matches.filter(({ doc, tx }) => documentCounts.get(doc) === 1 && transactionCounts.get(tx) === 1).map(({ doc, tx }) => [tx, doc]));
-}
 
 // src/documented-credits.ts
 function one(items) {
@@ -742,15 +694,76 @@ function ownAccount(ctx, add) {
   }
 }
 function invoices(ctx, add) {
-  for (const [txId, docId] of matchedInvoices(ctx.pack, ctx.subjects)) {
-    const tx = ctx.subjects.find((t) => t.transaction_id === txId);
+  const matches = [];
+  const conflicts = [];
+  const docCounts = /* @__PURE__ */ new Map();
+  const txCounts = /* @__PURE__ */ new Map();
+  const relevant = new Set(ctx.subjects.map((tx) => tx.transaction_id));
+  for (const doc of ofType(ctx, "supplier_invoice", "invoice", "carrier_invoice")) {
+    const md = doc.markdown;
+    if (doc.extraction.entries.length || tableRows(md, ["invoice", "amount"]).length || /instal+ments?/i.test(md)) continue;
+    const titleIssuer = fromTitle(doc, /\bfrom (.+)$/i);
+    const issuers = ["Supplier", "Carrier"].flatMap((key) => fields(md, key).map((value) => value.split(",")[0]));
+    if (titleIssuer) issuers.push(titleIssuer);
+    const buyers = ["Buyer", "Bill to"].flatMap((key) => fields(md, key));
+    const amounts = ["Amount", "Amount due", "Total"].flatMap((key) => fields(md, key));
+    const amount = amounts.length === 1 ? parseGbp(amounts[0])?.minorUnits : void 0;
+    const dates = fields(md, "Dated");
+    const destinations = fields(md, "Pay to");
+    if (!buyers.length || buyers.some((buyer) => !sameName(buyer, ctx.name)) || !amount || destinations.length > 1 || dates.some((date) => isoDay(date) !== dated(doc))) continue;
+    const payTo = destinations[0];
+    const namedDestination = payTo && /^(.+?),\s*((?:IBAN|account)\b.+)$/i.exec(payTo);
+    const accountOnly = payTo && /^(?:IBAN|account)\b/i.test(payTo);
+    const payee = namedDestination ? namedDestination[1] : accountOnly ? void 0 : payTo;
+    const account = namedDestination ? namedDestination[2] : accountOnly ? payTo : void 0;
+    const ref = /\b(INV \d+|CARRIER \d+|PO \d+)\b/.exec(title(md))?.[1] ?? /\border (PO \d+)\b/i.exec(field2(md, "Goods") ?? "")?.[1];
+    if (!issuers.length && !payee) continue;
+    for (const tx of ctx.history) {
+      if (tx.direction !== "out" || !samePence(tx, amount) || !recentBefore(doc, tx, 60) || issuers.some((issuer) => !sameName(tx.counterparty_name, issuer)) || ref && !refHas(tx, ref)) continue;
+      const accountMatches = !!account && sameAccount(account, tx.counterparty_account);
+      if (payee && !sameName(payee, tx.counterparty_name)) {
+        if (relevant.has(tx.transaction_id) && (ref || accountMatches)) conflicts.push({ doc, tx, payee });
+        continue;
+      }
+      if (account && !accountMatches) continue;
+      matches.push({ doc, tx, ref });
+      docCounts.set(doc, (docCounts.get(doc) ?? 0) + 1);
+      txCounts.set(tx.transaction_id, (txCounts.get(tx.transaction_id) ?? 0) + 1);
+    }
+  }
+  for (const { doc, tx, ref } of matches) {
+    if (!relevant.has(tx.transaction_id) || docCounts.get(doc) !== 1 || txCounts.get(tx.transaction_id) !== 1) continue;
+    const supplier = tx.counterparty_name;
+    const support = ofType(ctx, "purchase_order", "supply_contract").filter((other) => dated(other) <= txDay(tx) && (other.metadata.type === "purchase_order" ? !!ref && /^PO /.test(ref) && refHasText(other.markdown, ref) : norm(other.markdown).includes(norm(supplier))));
     add(tx, {
       code: "INVOICE_MATCHES",
-      docs: [docId],
+      docs: [doc.metadata.doc_id, ...support.map((d) => d.metadata.doc_id)],
       related: [],
-      fact: `${docId} is billed to ${label(ctx.name)} and matches the payee, amount and date of ${describe(tx)}`
+      fact: `${doc.metadata.doc_id} from ${supplier} bills ${label(ctx.name)}${ref ? ` under ${ref}` : ""} and matches the payee, amount and date of ${describe(tx)}`
     });
   }
+  return conflicts;
+}
+function heldPaymentReceipt(ctx, add) {
+  const held = ctx.pack.heldPayment;
+  if (ctx.pack.caseRecord.institution !== "payments_fx" || !held) return;
+  const matches = ofType(ctx, "receipt").filter((doc) => {
+    const merchant = fromTitle(doc, /^Receipt from (.+)$/i);
+    const day = dated(doc);
+    const amounts = [...doc.markdown.matchAll(/\bwe(?:['’]ve| have) (?:successfully )?(?:received|processed) your payment of (£[\d,.]+)(?=[.!?\s]|$)/gi)];
+    if (amounts.length !== 1 || !sameName(merchant, held.counterparty_name) || txDay(held) !== day || isoDay(field2(doc.markdown, "Dated")) !== day || /\b(?:not received|not processed|not yet|pending|partial payment|declined|reversed|refunded)\b/i.test(doc.markdown)) return false;
+    const amount = parseGbp(amounts[0][1].replace(/\.$/, ""))?.minorUnits;
+    if (!samePence(held, amount)) return false;
+    const transactions = ctx.history.filter((tx) => tx.direction === "out" && txDay(tx) === day && sameName(tx.counterparty_name, merchant) && samePence(tx, amount));
+    return transactions.length === 1;
+  });
+  if (matches.length !== 1) return;
+  add(held, {
+    code: "WITHIN_PROFILE",
+    docs: [matches[0].metadata.doc_id],
+    related: [],
+    fact: `Merchant receipt ${matches[0].metadata.doc_id} documents the order and matches the payee, amount and date of ${describe(held)}`
+  });
 }
 function credits(ctx, add) {
   for (const credit of documentedCredits(ctx.pack).values()) {
@@ -1114,32 +1127,6 @@ function cashRedeposits(ctx, add) {
     }
   }
 }
-function supplierInvoices(ctx, add) {
-  for (const doc of ofType(ctx, "supplier_invoice", "invoice", "carrier_invoice")) {
-    const md = doc.markdown;
-    if (tableRows(md, ["invoice", "amount"]).length || /instal+ments?/i.test(md)) continue;
-    const buyer = field2(md, "Buyer") ?? field2(md, "Bill to");
-    const supplier = (field2(md, "Supplier") ?? field2(md, "Carrier"))?.split(",")[0] ?? fromTitle(doc, /\bfrom (.+)$/i);
-    const amounts = ["Amount", "Amount due", "Total"].map((l) => field2(md, l)).filter((v) => !!v);
-    const amount = amounts.length === 1 ? pounds(amounts[0]) : void 0;
-    const payTo = field2(md, "Pay to");
-    const destination = payTo && /(?:IBAN|account)\b.*$/i.exec(payTo)?.[0];
-    const ref = /\b(INV \d+|CARRIER \d+|PO \d+)\b/.exec(title(md))?.[1] ?? /\border (PO \d+)\b/i.exec(field2(md, "Goods") ?? "")?.[1];
-    if (!sameName(buyer, ctx.name) || !supplier || amount === void 0) continue;
-    for (const tx of outgoing(ctx)) {
-      if (!sameName(tx.counterparty_name, supplier) || !samePence(tx, amount) || !recentBefore(doc, tx, 60)) continue;
-      if (destination && !sameAccount(destination, tx.counterparty_account)) continue;
-      if (ref && !refHas(tx, ref)) continue;
-      const support = ofType(ctx, "purchase_order", "supply_contract").filter((other) => other !== doc && dated(other) <= txDay(tx) && (other.metadata.type === "purchase_order" ? !!ref && /^PO /.test(ref) && refHasText(other.markdown, ref) : norm(other.markdown).includes(norm(supplier))));
-      add(tx, {
-        code: "INVOICE_MATCHES",
-        docs: [doc.metadata.doc_id, ...support.map((d) => d.metadata.doc_id)],
-        related: [],
-        fact: `${doc.metadata.doc_id} from ${supplier} bills ${label(ctx.name)}${ref ? ` under ${ref}` : ""} and matches the payee, amount and account of ${describe(tx)}`
-      });
-    }
-  }
-}
 var refHasText = (text2, ref) => new RegExp(`\\b${ref.replace(/\s+/g, "\\s+")}\\b`, "i").test(text2);
 function contractSchedules(ctx, add) {
   for (const doc of ofType(ctx, "contract_schedule")) {
@@ -1278,9 +1265,9 @@ function explainTransactions(pack) {
   const add = (tx, explanation) => {
     if (!byTx.has(tx.transaction_id)) byTx.set(tx.transaction_id, explanation);
   };
+  ownAccount(ctx, add);
+  const invoicePayeeConflicts = invoices(ctx, add);
   for (const explain of [
-    ownAccount,
-    invoices,
     credits,
     cancellations,
     settlementLetters,
@@ -1297,20 +1284,20 @@ function explainTransactions(pack) {
     hospitalInvoices,
     redundancy,
     cashRedeposits,
-    supplierInvoices,
     contractSchedules,
     contractorFiles,
     freightInvoices,
     groupCompanies,
     invoiceFinance,
     payroll,
+    heldPaymentReceipt,
     establishedPayees
   ]) {
     explain(ctx, add);
   }
   const unexplainedOnward = /* @__PURE__ */ new Map();
   clientFunding(ctx, add, byTx, unexplainedOnward);
-  return { byTx, unexplainedOnward };
+  return { byTx, invoicePayeeConflicts, unexplainedOnward };
 }
 
 // src/list-assessment.ts
@@ -1572,6 +1559,15 @@ function findSignals(pack, explained) {
   const flagged = pack.flaggedTransactions;
   const subjects = [...new Map([...pack.windowTransactions, ...flagged, ...pack.heldPayment ? [pack.heldPayment] : []].map((tx) => [tx.transaction_id, tx])).values()];
   const currentNotes = customerDocs(pack, "staff_note").filter((doc) => (isoDay(doc.metadata.dated) ?? "") >= from);
+  const casePaymentIds = new Set([...flagged, ...pack.heldPayment ? [pack.heldPayment] : []].map((tx) => tx.transaction_id));
+  for (const { doc, tx, payee } of explained.invoicePayeeConflicts) {
+    if (!casePaymentIds.has(tx.transaction_id)) continue;
+    signals.push({
+      code: "ESC_INVOICE_MISMATCH",
+      evidence: [doc.metadata.doc_id, tx.transaction_id],
+      fact: `${doc.metadata.doc_id} names ${label2(payee)} as the payment beneficiary, contradicting ${describe(tx)}`
+    });
+  }
   for (const note of currentNotes) {
     const text2 = note.markdown.replace(/^#.*$/m, "");
     if (STRUCTURING_LIMIT.test(text2) && STRUCTURING_PURPOSE.test(text2)) {
@@ -1727,6 +1723,7 @@ var SUSPICION_ORDER = [
 ];
 var GAP_ORDER = ["TM22", "RELEASE", "TM08", "TM02", "TM04", "TM03", "TM10", "TM06", "TM07", "TM05", "TM01", "PROFILE"];
 var CLOSE_OVERRIDES = ["LIST_MATCH_DIFFERENT_PARTY", "RETURNING_CUSTOMER", "GROUP_COMPANY", "COLLECTION_DOCUMENTED", "REFUND_OF_EARLIER_PAYMENT"];
+var RELEASE_DOCUMENT_TYPES = /* @__PURE__ */ new Set(["invoice", "supplier_invoice", "carrier_invoice", "dealer_invoice", "hospital_invoice", "contract_schedule"]);
 function material(alert, tx) {
   if (tx.channel === "card") return false;
   if (["TM02", "TM04", "TM07"].includes(alert.rule_id) && tx.direction === "out" && (tx.channel === "direct_debit" || tx.channel === "standing_order")) return false;
@@ -1771,7 +1768,7 @@ function covered(pack, alert, txs, open) {
     case "TM10":
       return open.length === 0 && txs.some((tx) => tx.channel === "fund_redemption");
     case "TM02":
-      return sumPence(open.filter((tx) => tx.direction === "in")) < 2e5;
+      return !open.some((tx) => tx.direction === "out") && sumPence(open.filter((tx) => tx.direction === "in")) < 2e5;
     case "TM04": {
       const limit = num(measured.limit) ?? 6;
       return new Set(open.map((tx) => nameKey(tx.counterparty_name ?? tx.transaction_id))).size <= limit;
@@ -1802,7 +1799,7 @@ function rapidMovementSuspicion(pack, open) {
     code,
     rank: 0,
     evidence: [...inn ? [inn.transaction_id] : [], out.transaction_id],
-    fact: `${inn ? `${describe(inn)} was received and` : "Funds were"} moved on within days ${where}, including ${describe(out)}, with no document on file explaining either leg`
+    fact: inn ? `${describe(inn)} was received and funds moved on within days ${where}, including ${describe(out)}, with neither leg explained` : `Funds moved on within days ${where}, including ${describe(out)}, and the onward payment has no credible explanation`
   };
 }
 function gapFor(pack, alert, open, index) {
@@ -1884,11 +1881,20 @@ function gapFor(pack, alert, open, index) {
     case "TM02": {
       const inn = largest2(open.filter((tx) => tx.direction === "in"));
       const out = largest2(open.filter((tx) => tx.direction === "out"));
+      if (out && !inn) {
+        return {
+          code: "RFI_PURPOSE_DOCUMENTS",
+          rank,
+          evidence: open.filter((tx) => tx.direction === "out").map((tx) => tx.transaction_id),
+          fact: `${alert.rule_id} flagged rapid movement of funds, but the onward payment of ${describe(out)} is not explained`,
+          request: `Ask ${name} for the invoice, contract or transfer instruction supporting the unexplained onward payment${open.length === 1 ? "" : "s"}`
+        };
+      }
       return {
         code: "RFI_PURPOSE_DOCUMENTS",
         rank,
         evidence: distinct([...inn ? [inn.transaction_id] : [], ...out ? [out.transaction_id] : []]),
-        fact: `${alert.rule_id} flagged money moving through the account within days${inn ? `, including ${describe(inn)}` : ""}${out ? ` and ${describe(out)}` : ""}; no document on file explains it, though nothing suggests the money went to unrelated people, abroad or to crypto`,
+        fact: `${alert.rule_id} flagged money moving through the account within days${inn ? `, including ${describe(inn)}` : ""}${out ? ` and ${describe(out)}` : ""}; no document on file explains the unresolved activity`,
         request: `Ask ${name} for the documents behind ${inn ? "the incoming payment" : "the funds"}${out ? " and the onward payment, such as the agreement, letter or invoice for each" : ""}`
       };
     }
@@ -2012,22 +2018,31 @@ function decideCase(pack) {
     }
     gaps.push(gapFor(pack, alert, open, index));
   }
-  if (caseRecord.institution === "payments_fx" && heldPayment && heldPayment.amount_gbp >= 1e4 && !sameName(heldPayment.counterparty_name, customer.name)) {
+  let heldSupport;
+  if (caseRecord.institution === "payments_fx" && heldPayment) {
     const support = index.byTx.get(heldPayment.transaction_id);
-    if (!support || !support.docs.length || !["INVOICE_MATCHES", "OWN_ACCOUNT"].includes(support.code)) {
+    const large = heldPayment.amount_gbp >= 1e4;
+    const owned = support?.code === "OWN_ACCOUNT" && support.docs.length > 0;
+    const evidencedPurpose = support?.code === "INVOICE_MATCHES" && documents.some((doc) => RELEASE_DOCUMENT_TYPES.has(doc.metadata.type) && support.docs.includes(doc.metadata.doc_id));
+    if (support && (!large || owned || evidencedPurpose)) {
+      heldSupport = { tx: heldPayment, explanation: support };
+    } else {
+      const payee = label3(heldPayment.counterparty_name ?? "the beneficiary");
+      const ownName = sameName(heldPayment.counterparty_name, customer.name);
       gaps.push({
         code: "RFI_PURPOSE_DOCUMENTS",
         rank: GAP_ORDER.indexOf("RELEASE"),
         evidence: [heldPayment.transaction_id],
-        fact: `The held payment of ${describe(heldPayment)} is \xA310,000 or more to a third party and no invoice or contract on file supports it`,
-        request: `Ask ${label3(customer.name)} for the invoice or signed contract that names ${label3(heldPayment.counterparty_name ?? "the beneficiary")} and supports the exact held amount before release`
+        fact: `The held payment of ${describe(heldPayment)} ${ownName ? "names the client but the destination account has not been shown to belong to them" : large ? "is \xA310,000 or more and no invoice or contract on file supports it" : "is not explained by the evidence on file"}`,
+        request: ownName ? `Ask ${label3(customer.name)} for a statement showing they hold the destination account for the exact held payment before release` : `Ask ${label3(customer.name)} for ${large ? "the invoice or signed contract" : "the invoice, contract or payment instruction"} that names ${payee} and supports the exact held amount before release`
       });
     }
   }
-  const relyOnOwn = covers.some((cover) => cover.explanations.some((item) => item.explanation.code === "OWN_ACCOUNT" || item.explanation.ownFunds));
-  const ratio = relyOnOwn ? profileRatio(pack) : void 0;
+  const items = covers.flatMap((cover) => cover.explanations);
+  if (heldSupport && !items.some(({ tx }) => tx.transaction_id === heldSupport.tx.transaction_id)) items.push(heldSupport);
+  const own = items.filter((item) => item.explanation.code === "OWN_ACCOUNT" || item.explanation.ownFunds);
+  const ratio = own.length ? profileRatio(pack) : void 0;
   if (ratio?.atLeastFive) {
-    const own = covers.flatMap((cover) => cover.explanations).filter((item) => item.explanation.code === "OWN_ACCOUNT" || item.explanation.ownFunds);
     gaps.push({
       code: "RFI_UPDATED_PROFILE",
       rank: GAP_ORDER.indexOf("PROFILE"),
@@ -2064,14 +2079,13 @@ function decideCase(pack) {
     if (closed) reason.splice(1, 0, `${closed.fact ?? closed.explanations.find((item) => item.explanation.docs.length).explanation.fact}, which settles ${closed.alert.rule_id}`);
     evidence = distinct(ordered.flatMap((gap) => gap.evidence));
   } else {
-    const items = covers.flatMap((cover) => cover.explanations);
     const special = covers.find((cover) => cover.code === "LIST_MATCH_DIFFERENT_PARTY") ?? covers.find((cover) => cover.code === "RETURNING_CUSTOMER");
     const best = special?.code ?? closeCode(items);
     verdict = "CLOSE";
     code = best;
     const documented = distinct(items.filter((item) => item.explanation.code !== "WITHIN_PROFILE" || item.explanation.docs.length).sort((a, b) => b.tx.amount_gbp - a.tx.amount_gbp).map((item) => item.explanation.fact));
     const lead = special?.fact;
-    const facts = distinct([...lead ? [lead] : [], ...documented]).slice(0, 2);
+    const facts = distinct([...lead ? [lead] : [], ...heldSupport ? [heldSupport.explanation.fact] : [], ...documented]).slice(0, 2);
     reason = [
       ...facts.length ? facts : [`The flagged activity fits ${name}'s declared profile`],
       `Together the evidence explains all the activity behind ${rules}${heldPayment ? ", so the held payment can be released" : ""}`

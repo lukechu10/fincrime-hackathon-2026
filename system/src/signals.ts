@@ -48,6 +48,12 @@ export function findSignals(pack: InstitutionCasePack, explained: ExplanationInd
   const subjects = [...new Map([...pack.windowTransactions, ...flagged, ...(pack.heldPayment ? [pack.heldPayment] : [])]
     .map((tx) => [tx.transaction_id, tx])).values()];
   const currentNotes = customerDocs(pack, "staff_note").filter((doc) => (isoDay(doc.metadata.dated) ?? "") >= from);
+  const casePaymentIds = new Set([...flagged, ...(pack.heldPayment ? [pack.heldPayment] : [])].map((tx) => tx.transaction_id));
+  for (const { doc, tx, payee } of explained.invoicePayeeConflicts) {
+    if (!casePaymentIds.has(tx.transaction_id)) continue;
+    signals.push({ code: "ESC_INVOICE_MISMATCH", evidence: [doc.metadata.doc_id, tx.transaction_id],
+      fact: `${doc.metadata.doc_id} names ${label(payee)} as the payment beneficiary, contradicting ${describe(tx)}` });
+  }
 
   for (const note of currentNotes) {
     const text = note.markdown.replace(/^#.*$/m, "");

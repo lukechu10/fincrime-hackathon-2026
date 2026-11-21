@@ -1,7 +1,7 @@
 import type { BankTransaction, InstitutionCasePack } from "./bank-cases.js";
 import { documentedCredits } from "./documented-credits.js";
 import type { EvidenceDocument } from "./evidence.js";
-import { matchedInvoices } from "./reconciliation.js";
+import { parseGbp } from "./evidence-extraction.js";
 import {
   addDays, daysBetween, field, fields, HIGHER_RISK_COUNTRIES, isoDay, isoMonth, nameKey, norm, onlyPounds, pounds, poundsIn,
   sameAccount, sameName, samePence, surname, tableRows, title, txDay,
@@ -24,6 +24,7 @@ export interface Explanation {
 
 export interface ExplanationIndex {
   readonly byTx: ReadonlyMap<string, Explanation>;
+  readonly invoicePayeeConflicts: readonly { tx: BankTransaction; doc: EvidenceDocument; payee: string }[];
   /** Payments/FX: client funding whose onward payment is not documented, keyed by the funding transaction. */
   readonly unexplainedOnward: ReadonlyMap<string, BankTransaction>;
 }
@@ -98,12 +99,78 @@ function ownAccount(ctx: Context, add: Add): void {
   }
 }
 
-function invoices(ctx: Context, add: Add): void {
-  for (const [txId, docId] of matchedInvoices(ctx.pack, ctx.subjects)) {
-    const tx = ctx.subjects.find((t) => t.transaction_id === txId)!;
-    add(tx, { code: "INVOICE_MATCHES", docs: [docId], related: [],
-      fact: `${docId} is billed to ${label(ctx.name)} and matches the payee, amount and date of ${describe(tx)}` });
+function invoices(ctx: Context, add: Add): ExplanationIndex["invoicePayeeConflicts"] {
+  const matches: { doc: EvidenceDocument; tx: BankTransaction; ref?: string }[] = [];
+  const conflicts: { doc: EvidenceDocument; tx: BankTransaction; payee: string }[] = [];
+  const docCounts = new Map<EvidenceDocument, number>();
+  const txCounts = new Map<string, number>();
+  const relevant = new Set(ctx.subjects.map((tx) => tx.transaction_id));
+  for (const doc of ofType(ctx, "supplier_invoice", "invoice", "carrier_invoice")) {
+    const md = doc.markdown;
+    if (doc.extraction.entries.length || tableRows(md, ["invoice", "amount"]).length || /instal+ments?/i.test(md)) continue;
+    const titleIssuer = fromTitle(doc, /\bfrom (.+)$/i);
+    const issuers = ["Supplier", "Carrier"].flatMap((key) => fields(md, key).map((value) => value.split(",")[0]));
+    if (titleIssuer) issuers.push(titleIssuer);
+    const buyers = ["Buyer", "Bill to"].flatMap((key) => fields(md, key));
+    const amounts = ["Amount", "Amount due", "Total"].flatMap((key) => fields(md, key));
+    const amount = amounts.length === 1 ? parseGbp(amounts[0])?.minorUnits : undefined;
+    const dates = fields(md, "Dated");
+    const destinations = fields(md, "Pay to");
+    if (!buyers.length || buyers.some((buyer) => !sameName(buyer, ctx.name)) || !amount || destinations.length > 1
+      || dates.some((date) => isoDay(date) !== dated(doc))) continue;
+    const payTo = destinations[0];
+    const namedDestination = payTo && /^(.+?),\s*((?:IBAN|account)\b.+)$/i.exec(payTo);
+    const accountOnly = payTo && /^(?:IBAN|account)\b/i.test(payTo);
+    const payee = namedDestination ? namedDestination[1] : accountOnly ? undefined : payTo;
+    const account = namedDestination ? namedDestination[2] : accountOnly ? payTo : undefined;
+    const ref = /\b(INV \d+|CARRIER \d+|PO \d+)\b/.exec(title(md))?.[1] ?? /\border (PO \d+)\b/i.exec(field(md, "Goods") ?? "")?.[1];
+    if (!issuers.length && !payee) continue;
+    // Include earlier movements when deciding whether a single invoice supports a unique payment.
+    for (const tx of ctx.history) {
+      if (tx.direction !== "out" || !samePence(tx, amount) || !recentBefore(doc, tx, 60)
+        || issuers.some((issuer) => !sameName(tx.counterparty_name, issuer)) || (ref && !refHas(tx, ref))) continue;
+      const accountMatches = !!account && sameAccount(account, tx.counterparty_account);
+      if (payee && !sameName(payee, tx.counterparty_name)) {
+        if (relevant.has(tx.transaction_id) && (ref || accountMatches)) conflicts.push({ doc, tx, payee });
+        continue;
+      }
+      if (account && !accountMatches) continue;
+      matches.push({ doc, tx, ref });
+      docCounts.set(doc, (docCounts.get(doc) ?? 0) + 1);
+      txCounts.set(tx.transaction_id, (txCounts.get(tx.transaction_id) ?? 0) + 1);
+    }
   }
+  for (const { doc, tx, ref } of matches) {
+    if (!relevant.has(tx.transaction_id) || docCounts.get(doc) !== 1 || txCounts.get(tx.transaction_id) !== 1) continue;
+    const supplier = tx.counterparty_name!;
+    const support = ofType(ctx, "purchase_order", "supply_contract").filter((other) => dated(other) <= txDay(tx)
+      && (other.metadata.type === "purchase_order" ? !!ref && /^PO /.test(ref) && refHasText(other.markdown, ref) : norm(other.markdown).includes(norm(supplier))));
+    add(tx, { code: "INVOICE_MATCHES", docs: [doc.metadata.doc_id, ...support.map((d) => d.metadata.doc_id)], related: [],
+      fact: `${doc.metadata.doc_id} from ${supplier} bills ${label(ctx.name)}${ref ? ` under ${ref}` : ""} and matches the payee, amount and date of ${describe(tx)}` });
+  }
+  return conflicts;
+}
+
+/** A merchant receipt can explain the purpose of a held payment, but is not an invoice or contract. */
+function heldPaymentReceipt(ctx: Context, add: Add): void {
+  const held = ctx.pack.heldPayment;
+  if (ctx.pack.caseRecord.institution !== "payments_fx" || !held) return;
+  const matches = ofType(ctx, "receipt").filter((doc) => {
+    const merchant = fromTitle(doc, /^Receipt from (.+)$/i);
+    const day = dated(doc);
+    const amounts = [...doc.markdown.matchAll(/\bwe(?:['’]ve| have) (?:successfully )?(?:received|processed) your payment of (£[\d,.]+)(?=[.!?\s]|$)/gi)];
+    if (amounts.length !== 1 || !sameName(merchant, held.counterparty_name) || txDay(held) !== day
+      || isoDay(field(doc.markdown, "Dated")) !== day
+      || /\b(?:not received|not processed|not yet|pending|partial payment|declined|reversed|refunded)\b/i.test(doc.markdown)) return false;
+    const amount = parseGbp(amounts[0][1].replace(/\.$/, ""))?.minorUnits;
+    if (!samePence(held, amount)) return false;
+    const transactions = ctx.history.filter((tx) => tx.direction === "out" && txDay(tx) === day
+      && sameName(tx.counterparty_name, merchant) && samePence(tx, amount));
+    return transactions.length === 1;
+  });
+  if (matches.length !== 1) return;
+  add(held, { code: "WITHIN_PROFILE", docs: [matches[0].metadata.doc_id], related: [],
+    fact: `Merchant receipt ${matches[0].metadata.doc_id} documents the order and matches the payee, amount and date of ${describe(held)}` });
 }
 
 function credits(ctx: Context, add: Add): void {
@@ -443,29 +510,6 @@ function cashRedeposits(ctx: Context, add: Add): void {
   }
 }
 
-function supplierInvoices(ctx: Context, add: Add): void {
-  for (const doc of ofType(ctx, "supplier_invoice", "invoice", "carrier_invoice")) {
-    const md = doc.markdown;
-    if (tableRows(md, ["invoice", "amount"]).length || /instal+ments?/i.test(md)) continue;
-    const buyer = field(md, "Buyer") ?? field(md, "Bill to");
-    const supplier = (field(md, "Supplier") ?? field(md, "Carrier"))?.split(",")[0] ?? fromTitle(doc, /\bfrom (.+)$/i);
-    const amounts = ["Amount", "Amount due", "Total"].map((l) => field(md, l)).filter((v): v is string => !!v);
-    const amount = amounts.length === 1 ? pounds(amounts[0]) : undefined;
-    const payTo = field(md, "Pay to");
-    const destination = payTo && /(?:IBAN|account)\b.*$/i.exec(payTo)?.[0];
-    const ref = /\b(INV \d+|CARRIER \d+|PO \d+)\b/.exec(title(md))?.[1] ?? /\border (PO \d+)\b/i.exec(field(md, "Goods") ?? "")?.[1];
-    if (!sameName(buyer, ctx.name) || !supplier || amount === undefined) continue;
-    for (const tx of outgoing(ctx)) {
-      if (!sameName(tx.counterparty_name, supplier) || !samePence(tx, amount) || !recentBefore(doc, tx, 60)) continue;
-      if (destination && !sameAccount(destination, tx.counterparty_account)) continue;
-      if (ref && !refHas(tx, ref)) continue;
-      const support = ofType(ctx, "purchase_order", "supply_contract").filter((other) => other !== doc && dated(other) <= txDay(tx)
-        && (other.metadata.type === "purchase_order" ? !!ref && /^PO /.test(ref) && refHasText(other.markdown, ref) : norm(other.markdown).includes(norm(supplier))));
-      add(tx, { code: "INVOICE_MATCHES", docs: [doc.metadata.doc_id, ...support.map((d) => d.metadata.doc_id)], related: [],
-        fact: `${doc.metadata.doc_id} from ${supplier} bills ${label(ctx.name)}${ref ? ` under ${ref}` : ""} and matches the payee, amount and account of ${describe(tx)}` });
-    }
-  }
-}
 const refHasText = (text: string, ref: string) => new RegExp(`\\b${ref.replace(/\s+/g, "\\s+")}\\b`, "i").test(text);
 
 function contractSchedules(ctx: Context, add: Add): void {
@@ -591,13 +635,15 @@ export function explainTransactions(pack: InstitutionCasePack): ExplanationIndex
   const ctx = context(pack);
   const byTx = new Map<string, Explanation>();
   const add: Add = (tx, explanation) => { if (!byTx.has(tx.transaction_id)) byTx.set(tx.transaction_id, explanation); };
-  for (const explain of [ownAccount, invoices, credits, cancellations, settlementLetters, solicitorLetters, completionStatements,
+  ownAccount(ctx, add);
+  const invoicePayeeConflicts = invoices(ctx, add);
+  for (const explain of [credits, cancellations, settlementLetters, solicitorLetters, completionStatements,
     giftLetters, saleReceipts, takingsBooks, collectionReports, cashReconciliations, bookingConfirmations, tenancyDeposits,
-    vehicleFinance, hospitalInvoices, redundancy, cashRedeposits, supplierInvoices, contractSchedules, contractorFiles,
-    freightInvoices, groupCompanies, invoiceFinance, payroll, establishedPayees]) {
+    vehicleFinance, hospitalInvoices, redundancy, cashRedeposits, contractSchedules, contractorFiles,
+    freightInvoices, groupCompanies, invoiceFinance, payroll, heldPaymentReceipt, establishedPayees]) {
     explain(ctx, add);
   }
   const unexplainedOnward = new Map<string, BankTransaction>();
   clientFunding(ctx, add, byTx, unexplainedOnward);
-  return { byTx, unexplainedOnward };
+  return { byTx, invoicePayeeConflicts, unexplainedOnward };
 }

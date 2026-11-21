@@ -102,6 +102,22 @@ test("undocumented rapid movement asks for documents unless the money goes to cr
   assert.equal(decide({ alerts: [alert("A1", "TM02", [inflow, ...people])], txs: [inflow, ...people] }).verdict, "ESCALATE");
 });
 
+test("TM02 needs the material onward payment explained even when the incoming funds are documented", () => {
+  const gift = tx("I1", "in", 15000, "Sam Giver");
+  const onward = tx("O1", "out", 13000, "Car Dealer Ltd", { booked_at: "2026-09-13T10:00:00Z" });
+  const letter = doc("G1", "gift_letter", giftBody("£15,000.00"));
+  const invoice = doc("V1", "invoice", "# Invoice from Car Dealer Ltd\n**Bill to:** Robin Tester\n**Amount due:** £13,000.00\n**Pay to:** Car Dealer Ltd");
+  const run = (payment: BankTransaction, docs: EvidenceDocument[] = [letter]) =>
+    decide({ alerts: [alert("A1", "TM02", [gift, payment])], txs: [gift, payment], docs });
+  const missing = run(onward);
+  assert.equal(missing.reason_code, "RFI_PURPOSE_DOCUMENTS");
+  assert.match(missing.reason, /onward payment of £13,000\.00 to Car Dealer Ltd/);
+  assert.ok(missing.evidence.includes("O1"));
+  assert.equal(run({ ...onward, counterparty_name: "Fastcoin Exchange Ltd" }).reason_code, "ESC_PASS_THROUGH");
+  assert.equal(run(onward, [invoice]).verdict, "RFI", "the invoice alone does not explain the inflow");
+  assert.equal(run(onward, [letter, invoice]).verdict, "CLOSE");
+});
+
 test("a staff note about staying under a threshold escalates as structuring, ahead of other findings", () => {
   const cash = [900, 950, 980].map((amount, i) => tx(`C${i}`, "in", amount, null, { channel: "cash_topup" }));
   const note = doc("N1", "staff_note", "# Note by outlet\n\nThe customer asked whether keeping each top-up below £1,000 would avoid identity checks.");
@@ -146,6 +162,78 @@ test("payments/FX own funding closes through a proven own-account onward payment
   assert.equal(missing.verdict, "RFI");
   assert.equal(missing.reason_code, "RFI_PURPOSE_DOCUMENTS");
   assert.ok(missing.evidence.includes("O1"));
+});
+
+test("FX release requires evidence for the held payment itself at every amount", () => {
+  const gift = tx("I1", "in", 15000, "Sam Giver");
+  const held = tx("H1", "out", 10000, "Robin Tester", { counterparty_account: "11-22-33 44556677" });
+  const letter = doc("G1", "gift_letter", giftBody("£15,000.00"));
+  const statement = doc("S1", "bank_statement", "# External bank statement\n**Account holder:** Robin Tester\n**Account:** 11-22-33 44556677");
+  const run = (payment: BankTransaction, docs: EvidenceDocument[] = []) => decide({ institution: "payments_fx", held: payment,
+    customer: { kind: "business", declared: { annual_turnover_gbp: 120000 } },
+    alerts: [alert("A1", "TM08", [gift])], txs: [gift], docs: [letter, ...docs] });
+  const unresolved = run(held);
+  assert.equal(unresolved.verdict, "RFI");
+  assert.match(unresolved.reason, /statement showing they hold the destination account/);
+  assert.ok(unresolved.evidence.includes("H1"));
+  const owned = run(held, [statement]);
+  assert.equal(owned.verdict, "CLOSE");
+  assert.ok(owned.evidence.includes("S1") && owned.evidence.includes("H1"));
+  assert.match(owned.reason, /holds the account used for/);
+  assert.equal(run({ ...held, counterparty_account: "11-22-33 44556678" }, [statement]).verdict, "RFI");
+  assert.equal(run({ ...held, amount_gbp: 9999.99, counterparty_name: "Vendor Ltd" }).verdict, "RFI");
+});
+
+test("a payment file can explain a held payment below £10,000 but is not a high-value invoice or contract", () => {
+  const held = tx("H1", "out", 10000, "Avery Contractor", { counterparty_country: "Italy" });
+  const run = (amount: number) => {
+    const payment = { ...held, amount_gbp: amount };
+    const paymentFile = doc("P1", "payment_file", `# Payment file\n| Contractor | Country | Amount |\n|---|---|---|\n| Avery Contractor | Italy | £${amount.toFixed(2)} |`);
+    return decide({ institution: "payments_fx", held: payment, txs: [payment], docs: [paymentFile], alerts: [alert("A1", "TM07", [payment])] });
+  };
+  assert.equal(run(9999.99).verdict, "CLOSE");
+  assert.equal(run(10000).reason_code, "RFI_PURPOSE_DOCUMENTS");
+});
+
+test("a uniquely matching merchant receipt can support a small held payment, but is not an invoice", () => {
+  const gift = tx("I1", "in", 15000, "Sam Giver");
+  const letter = doc("G1", "gift_letter", giftBody("£15,000.00"));
+  const held = tx("H1", "out", 1550, "Vendor Ltd");
+  const receipt = (amount: string, merchant = "Vendor Ltd", received = "received") => doc("R1", "receipt",
+    `# Receipt from ${merchant}\n**Dated:** 12 September 2026\nWe have successfully ${received} your payment of ${amount}.`, "2026-09-12");
+  const run = (docs: EvidenceDocument[], payment = held) => decide({ institution: "payments_fx", held: payment, txs: [gift, payment],
+    docs: [letter, ...docs], alerts: [alert("A1", "TM08", [gift])] });
+  const close = run([receipt("£1,550.00")]);
+  assert.equal(close.verdict, "CLOSE");
+  assert.ok(close.evidence.includes("R1") && close.evidence.includes("H1"));
+  assert.equal(run([receipt("£1,551.00")]).verdict, "RFI");
+  assert.equal(run([receipt("£1,550.00", "Other Ltd")]).verdict, "RFI");
+  assert.equal(run([receipt("£1,550.00", "Vendor Ltd", "not received")]).verdict, "RFI");
+  assert.equal(run([receipt("£10,000.00")], { ...held, amount_gbp: 10000 }).verdict, "RFI");
+});
+
+test("a linked invoice with a contradictory beneficiary blocks FX release even if another invoice matches", () => {
+  const payment = tx("H1", "out", 12000, "Vendor Ltd", { counterparty_account: "11-22-33 44556677" });
+  const invoice = (id: string, payee: string) => doc(id, "supplier_invoice", `# Invoice from Vendor Ltd\n**Supplier:** Vendor Ltd\n**Bill to:** Robin Tester\n**Amount due:** £12,000.00\n**Pay to:** ${payee}, account 11-22-33 44556677`);
+  const good = invoice("V1", "Vendor Ltd");
+  const bad = invoice("V2", "Different Ltd");
+  const run = (docs: EvidenceDocument[]) => decide({ institution: "payments_fx", held: payment, txs: [payment], docs,
+    alerts: [alert("A1", "TM07", [payment])] });
+  assert.equal(run([good]).verdict, "CLOSE");
+  for (const docs of [[bad], [good, bad]]) {
+    const result = run(docs);
+    assert.equal(result.reason_code, "ESC_INVOICE_MISMATCH");
+    assert.deepEqual(result.evidence, ["V2", "H1"]);
+  }
+  assert.equal(run([good, invoice("V3", "Vendor Ltd")]).verdict, "RFI", "two candidate documents are not a unique match");
+});
+
+test("a single ordinary invoice is not reused for several equal payments", () => {
+  const payments = [12, 13, 14].map((day) => tx(`O${day}`, "out", 9500, "Vendor Ltd", { booked_at: `2026-09-${day}T10:00:00Z` }));
+  const invoice = doc("V1", "supplier_invoice", "# Invoice from Vendor Ltd\n**Supplier:** Vendor Ltd\n**Bill to:** Robin Tester\n**Amount due:** £9,500.00");
+  const result = decide({ institution: "payments_fx", held: payments[0], txs: payments, docs: [invoice], alerts: [alert("A1", "TM03", payments)] });
+  assert.equal(result.verdict, "RFI");
+  assert.ok(!result.evidence.includes("V1"));
 });
 
 test("a single undocumented commercial payment to a higher-risk country is an RFI, a spread to individuals escalates", () => {

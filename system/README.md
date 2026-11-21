@@ -18,7 +18,7 @@ The output directory must already exist. The runner writes exactly one JSON line
 
 The runner is deterministic and makes no model calls. It treats alerts as already raised; it does not rerun the upstream monitoring thresholds. The same code serves all four institutions, and institution differences come from the data and the SOP settings: thresholds in the alert measurements, the payments/FX held-payment release gate, and own-name funding being normal at payments/FX. Each case runs in four steps.
 
-1. **Explain transactions** ([`explanations.ts`](src/explanations.ts)). Each recognized document is checked against the case's transactions. Every check must hold: party names, exact amount in pence, account number (full or the same masked suffix), reference, and a document date shortly before the payment. Recognized document types:
+1. **Explain transactions** ([`explanations.ts`](src/explanations.ts)). Document-specific checks compare party names, exact amounts, dates, and account or reference details where applicable. An ordinary outgoing invoice must reconcile uniquely to one payment; a stated beneficiary or account must also match. Recognized document types:
    - Bank statements, including joint accounts and "Account … is held by" lines (`OWN_ACCOUNT`).
    - Invoices, dealer, hospital, carrier and pro forma invoices, contract payment schedules, contractor payment files and freight invoices (`INVOICE_MATCHES`).
    - Insurance settlements, settlement, solicitor and estate letters, completion statements, private sale receipts, tenancy deposit letters and loan agreements (`DOCUMENTED_EVENT`).
@@ -27,7 +27,7 @@ The runner is deterministic and makes no model calls. It treats alerts as alread
    - Group structure charts (`GROUP_COMPANY`).
    - Group-trip booking confirmations (`COLLECTION_DOCUMENTED`).
    - Takings books, car-park collection reports and event cash reconciliations (`BUSINESS_RECORDS_RECONCILE`).
-   - Declared payroll, payees paid at least twice before the window, and a cash re-deposit that matches an earlier reviewed withdrawal (`WITHIN_PROFILE`).
+   - Declared payroll, established payees, cash re-deposits matching earlier reviewed withdrawals, and same-day merchant receipts matching a unique held payment (`WITHIN_PROFILE`).
 
    At payments/FX, routine own-name funding is normal. A large dedicated funding transfer counts as explained only when the payment it funded within three days is itself documented.
 2. **Look for suspicion** ([`signals.ts`](src/signals.ts)). Each of the following is a concrete signal:
@@ -38,13 +38,13 @@ The runner is deterministic and makes no model calls. It treats alerts as alread
    - A customer saying others use their account.
    - A payer company dissolved before it paid.
    - Payees controlled by the customer's own director.
-   - An invoice table that contradicts the payment it names.
+   - An invoice table that contradicts the payment it names, or a linked ordinary invoice that names a different payment beneficiary.
    - A payment file with many payees sharing a few addresses.
 3. **Assess each alert against its own rule.**
    - **Internal-list matches (TM22)** use the list assessment. Registers are read on the transaction date, and a gift letter's stated date of birth counts as identity evidence.
    - **Every other alert** is covered when what remains unexplained falls below that rule's own threshold:
      - TM01: only the customer's own top-ups may remain, within the rule's multiple.
-     - TM02: the remaining unexplained inflow is below £2,000.
+     - TM02: the remaining unexplained inflow is below £2,000 **and** every material flagged onward payment is explained.
      - TM04: the remaining counterparties are within the limit.
      - TM06 and TM07: the remaining amount is below the limit.
      - All other rules: nothing may remain.
@@ -57,7 +57,7 @@ The runner is deterministic and makes no model calls. It treats alerts as alread
    - **Any suspicion wins:** escalate with fixed precedence: listed party, structuring, invoice mismatch, account misuse, early redemption, high-risk corridor, unexplained funds, mule activity, pass-through, then third-party funding.
    - **Otherwise any gap gives one RFI:** the identity question comes first, then the payments/FX release gate, then purpose before source. Other requests are listed in the same reason.
    - **Otherwise the case closes.** Own-account explanations go through the 5× rule first: activity at 5× or more of the declared monthly baseline gives `RFI_UPDATED_PROFILE`.
-   - **Payments/FX release gate:** a held payment of £10,000 or more to anyone other than the client needs a matched invoice or contract before it can close.
+   - **Payments/FX release gate:** the actual held payment must be explained at any amount. At £10,000 or more it needs a matched invoice or contract unless the destination account is documented as the client's own. A matching name alone does not establish ownership; a standalone payment file or merchant receipt does not replace the required invoice or contract.
 
 Reasons name the decisive facts, amounts, counterparties and documents. Evidence lists only IDs that exist in the supplied files.
 
