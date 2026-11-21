@@ -64,9 +64,9 @@ const PROMPTS: Record<TaskKind, string> = {
 Task: list every payment the document records or commits to between the customer and another party, and any statement that one company owns all of another.
 For each payment:
 - direction: "to_customer" if the other party pays the customer, "from_customer" if the customer pays the other party.
-- counterparty: the other party's name exactly as written; counterparty_quote: a span containing that name.
+- counterparty: the name of the firm, company or person that actually sends or receives the money (for example the solicitors' firm paying out an estate, not the estate or its executors), exactly as written; counterparty_quote: a span containing that name.
 - amount: the amount actually paid or to be paid, exactly as written with its £ sign (for example the net amount after any deduction); amount_quote: a span containing that amount.
-- reference: a payment, claim, booking, invoice or contract reference the document says the payment uses, else null; reference_quote: a span containing it.
+- reference: only a reference the document states for this specific payment (a claim, booking, invoice or payment reference), else null. Do not construct one from a pattern or example, and do not use clause numbers. reference_quote: a span containing exactly that reference.
 - due_date: for a payment scheduled on a specific date, that date exactly as written, else null; due_date_quote: a span containing it.
 - recipient: the person or company the document says receives the money, exactly as written, or null if it only says "you" or names no one; recipient_quote: a span containing it.
 - purpose: the closest category; use "other" if none fits.

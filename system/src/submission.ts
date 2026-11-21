@@ -53,12 +53,16 @@ export interface RunOptions {
   readonly reader?: DocumentReader | null;
 }
 
-/** The fallback reader for this run, if the evaluator supplied a key. */
-function defaultReader(): DocumentReader | undefined {
-  const apiKey = process.env.OPENROUTER_API_KEY?.trim();
+/**
+ * The fallback reader for this run. Without a non-blank OPENROUTER_API_KEY there is no reader, so the run makes no
+ * model calls and is fully offline. With a key, the pinned Haiku model is used unless OPENROUTER_MODEL overrides it.
+ */
+export function defaultReader(env: NodeJS.ProcessEnv = process.env): DocumentReader | undefined {
+  const apiKey = env.OPENROUTER_API_KEY?.trim();
+  if (!apiKey) return undefined;
   // OPENROUTER_MODEL overrides the pinned model, e.g. to try a free model during development.
-  const model = process.env.OPENROUTER_MODEL?.trim() || undefined;
-  return apiKey ? openRouterReader({ apiKey, model }) : undefined;
+  const model = env.OPENROUTER_MODEL?.trim() || undefined;
+  return openRouterReader({ apiKey, model });
 }
 
 export async function runSubmission(input: string, output: string, options: RunOptions = {}): Promise<void> {

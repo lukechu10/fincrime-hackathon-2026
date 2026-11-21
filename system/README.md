@@ -93,7 +93,16 @@ When `OPENROUTER_API_KEY` is set, the runner adds a second pass ([`src/llm/`](sr
 - **Limits:** a 45-second timeout per call, three attempts, and no new calls after 20 minutes.
 - **Logging:** stderr reports the number of calls, tokens and the cost OpenRouter returns.
 
-**Reproducibility:** this model does not accept a temperature setting. Repeat runs rely on the strict schema and on verbatim quote checks, so a different but valid wording of the same fact gives the same decision. Live runs still need checking across five repeats.
+**Default and off switch:** the default model is `anthropic/claude-haiku-5.5`. Without a non-blank `OPENROUTER_API_KEY` there is no fallback: the runner makes no model calls, ignores `OPENROUTER_MODEL`, and gives the offline result.
+
+**Model override:** `OPENROUTER_MODEL` replaces the default model, for example to try a free model during development. For models without structured output, the schema is also given in the prompt. Replies are parsed even when wrapped in reasoning text or a code fence.
+
+**First live runs (2026-11-21, `nvidia/nemotron-3-ultra-550b-a55b:free`, synthetic cases only):** correct verdicts went from 29 to 37 of 40 in both runs, and cost from 33 to 9, with no wrongful closes. Every call returned usable JSON, and 16 calls took about two minutes.
+- **Checks caught bad facts:** the model invented milestone references and named an estate's executors as the payer. The quote and party checks rejected both, leaving the case open rather than closing it.
+- **Results moved between runs:** the second run used a corrected prompt. PX-05 closed, IV-05 fell back to RFI, and BK-03 changed reason code. Because the prompt changed, run-to-run variation is not yet separated from the edit.
+- **Not yet run:** repeat runs on unchanged code and a full development run. The free tier caps requests per day.
+
+**Reproducibility:** the default model does not accept a temperature setting. Repeat runs rely on the strict schema and on verbatim quote checks, so a different but valid wording of the same fact gives the same decision. Live runs still need checking across five repeats.
 
 **Dry run with ideal answers:** a hand-written script supplied correct answers for the synthetic documents. Correct synthetic verdicts went from 29 to 39 of 40, with no wrongful closes; the short gift letter in IV-06 stays an RFI. Early-redemption explanations (IV-01) are not covered by the fallback.
 

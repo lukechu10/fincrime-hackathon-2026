@@ -4,10 +4,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { Institution } from "../src/bank-cases.js";
-import { runSubmission } from "../src/submission.js";
+import { defaultReader, runSubmission } from "../src/submission.js";
 
 /** Tests always run offline, whatever OPENROUTER_API_KEY holds. */
 const run = (input: string, output: string) => runSubmission(input, output, { reader: null });
+
+test("no API key means no model fallback, even when a model is named", () => {
+  assert.equal(defaultReader({}), undefined);
+  assert.equal(defaultReader({ OPENROUTER_API_KEY: "   " }), undefined);
+  assert.equal(defaultReader({ OPENROUTER_MODEL: "some/model" }), undefined);
+});
+
+test("with an API key the fallback defaults to Haiku unless overridden", () => {
+  // Building a reader makes no network call; its summary names the model it would use.
+  assert.match(defaultReader({ OPENROUTER_API_KEY: "test-key" })!.summary(), /^model anthropic\/claude-haiku-5\.5:/);
+  assert.match(defaultReader({ OPENROUTER_API_KEY: "test-key", OPENROUTER_MODEL: "other/model" })!.summary(), /^model other\/model:/);
+});
 
 function fixture(t: TestContext, institution: Institution, options: { fraud?: boolean; amount?: number; holder?: boolean; baseline?: number } = {}) {
   const root = mkdtempSync(join(tmpdir(), "fincrime-submission-"));

@@ -1733,7 +1733,7 @@ function checkPayments(doc, facts) {
     if (!backed(md, fact.counterparty, fact.counterparty_quote) || !quoted(md, fact.amount_quote)) return [];
     const [pence2] = poundsIn(fact.amount);
     if (pence2 === void 0 || !poundsIn(fact.amount_quote).includes(pence2)) return [];
-    if (fact.reference && !backed(md, fact.reference, fact.reference_quote)) return [];
+    const reference = fact.reference && backed(md, fact.reference, fact.reference_quote) ? fact.reference : void 0;
     if (fact.recipient && !backed(md, fact.recipient, fact.recipient_quote)) return [];
     let due;
     if (fact.due_date) {
@@ -1741,7 +1741,7 @@ function checkPayments(doc, facts) {
       due = isoDay(fact.due_date);
       if (!due) return [];
     }
-    return [{ fact, pence: pence2, due, reference: fact.reference ?? void 0 }];
+    return [{ fact, pence: pence2, due, reference }];
   });
 }
 var OWNS_ALL = /\b(?:100\s?%|entire|all (?:of )?the (?:issued )?shares|whole of the (?:issued )?share|wholly[- ]owned)/i;
@@ -2669,9 +2669,9 @@ var PROMPTS = {
 Task: list every payment the document records or commits to between the customer and another party, and any statement that one company owns all of another.
 For each payment:
 - direction: "to_customer" if the other party pays the customer, "from_customer" if the customer pays the other party.
-- counterparty: the other party's name exactly as written; counterparty_quote: a span containing that name.
+- counterparty: the name of the firm, company or person that actually sends or receives the money (for example the solicitors' firm paying out an estate, not the estate or its executors), exactly as written; counterparty_quote: a span containing that name.
 - amount: the amount actually paid or to be paid, exactly as written with its \xA3 sign (for example the net amount after any deduction); amount_quote: a span containing that amount.
-- reference: a payment, claim, booking, invoice or contract reference the document says the payment uses, else null; reference_quote: a span containing it.
+- reference: only a reference the document states for this specific payment (a claim, booking, invoice or payment reference), else null. Do not construct one from a pattern or example, and do not use clause numbers. reference_quote: a span containing exactly that reference.
 - due_date: for a payment scheduled on a specific date, that date exactly as written, else null; due_date_quote: a span containing it.
 - recipient: the person or company the document says receives the money, exactly as written, or null if it only says "you" or names no one; recipient_quote: a span containing it.
 - purpose: the closest category; use "other" if none fits.
@@ -2817,10 +2817,11 @@ var inside = (base, path) => {
   const sub = relative3(base, path);
   return !sub || sub !== ".." && !sub.startsWith(`..${sep3}`) && !isAbsolute3(sub);
 };
-function defaultReader() {
-  const apiKey = process.env.OPENROUTER_API_KEY?.trim();
-  const model = process.env.OPENROUTER_MODEL?.trim() || void 0;
-  return apiKey ? openRouterReader({ apiKey, model }) : void 0;
+function defaultReader(env = process.env) {
+  const apiKey = env.OPENROUTER_API_KEY?.trim();
+  if (!apiKey) return void 0;
+  const model = env.OPENROUTER_MODEL?.trim() || void 0;
+  return openRouterReader({ apiKey, model });
 }
 async function runSubmission(input, output, options = {}) {
   const target = resolve2(output);

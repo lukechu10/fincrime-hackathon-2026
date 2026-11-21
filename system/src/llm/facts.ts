@@ -101,7 +101,9 @@ export function checkPayments(doc: EvidenceDocument, facts: PaymentDocumentFacts
     if (!backed(md, fact.counterparty, fact.counterparty_quote) || !quoted(md, fact.amount_quote)) return [];
     const [pence] = poundsIn(fact.amount);
     if (pence === undefined || !poundsIn(fact.amount_quote).includes(pence)) return [];
-    if (fact.reference && !backed(md, fact.reference, fact.reference_quote)) return [];
+    // An unbacked reference is ignored rather than trusted. It only ever narrows matching, so the remaining
+    // backed values (party, exact amount, and a due date or the arrival window) must still match on their own.
+    const reference = fact.reference && backed(md, fact.reference, fact.reference_quote) ? fact.reference : undefined;
     if (fact.recipient && !backed(md, fact.recipient, fact.recipient_quote)) return [];
     let due: string | undefined;
     if (fact.due_date) {
@@ -109,7 +111,7 @@ export function checkPayments(doc: EvidenceDocument, facts: PaymentDocumentFacts
       due = isoDay(fact.due_date);
       if (!due) return [];
     }
-    return [{ fact, pence, due, reference: fact.reference ?? undefined }];
+    return [{ fact, pence, due, reference }];
   });
 }
 
