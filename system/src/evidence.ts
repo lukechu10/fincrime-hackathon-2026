@@ -1,5 +1,6 @@
 import { readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { stripBom, warn } from "./diagnostics.js";
 import { extractEvidence, type EvidenceExtraction } from "./evidence-extraction.js";
 
 export interface EvidenceMetadata {
@@ -24,6 +25,8 @@ export interface EvidenceIndex {
   get(docId: string): EvidenceDocument | undefined;
   /** Load this customer's documents only. The caller still decides case relevance. */
   documentsForCustomer(customerId: string): readonly EvidenceDocument[];
+  /** Customers named by a metadata row that could not be used; their evidence pack is incomplete. */
+  readonly damagedCustomers: ReadonlySet<string>;
 }
 
 function isMetadata(value: unknown): value is EvidenceMetadata {
@@ -49,19 +52,30 @@ export function loadEvidenceIndex(institutionDir: string): EvidenceIndex {
   const customers = new Map<string, EvidenceMetadata[]>();
   const cache = new Map<string, EvidenceDocument>();
 
-  for (const [i, line] of readFileSync(indexFile, "utf8").split(/\r?\n/).entries()) {
+  // A bad metadata row is skipped with a warning; a customer it still names is marked damaged so their cases
+  // are escalated rather than decided without that document.
+  const damagedCustomers = new Set<string>();
+  const markDamaged = (row: unknown) => {
+    const customer = typeof row === "object" && row !== null ? (row as Record<string, unknown>).customer_id : undefined;
+    if (typeof customer === "string" && customer.trim()) damagedCustomers.add(customer);
+  };
+  for (const [i, line] of stripBom(readFileSync(indexFile, "utf8")).split(/\r?\n/).entries()) {
     if (!line.trim()) continue;
     const location = `${indexFile}:${i + 1}`;
     let row: unknown;
     try {
       row = JSON.parse(line);
-    } catch (error) {
-      throw new Error(`${location}: invalid JSON`, { cause: error });
+    } catch {
+      warn(`${location}: skipped invalid JSON`);
+      continue;
     }
-    if (!isMetadata(row)) throw new Error(`${location}: invalid evidence metadata`);
-    if (rows.has(row.doc_id)) throw new Error(`${location}: duplicate evidence ID ${row.doc_id}`);
+    if (!isMetadata(row)) { warn(`${location}: skipped invalid evidence metadata`); markDamaged(row); continue; }
+    const first = rows.get(row.doc_id);
+    if (first) { warn(`${location}: skipped duplicate evidence ID ${row.doc_id}`); markDamaged(row); markDamaged(first); continue; }
     if (isAbsolute(row.file) || !row.file.endsWith(".md") || !within(evidenceDir, resolve(root, row.file))) {
-      throw new Error(`${location}: expected a relative Markdown path under evidence/ for ${row.doc_id}`);
+      warn(`${location}: skipped ${row.doc_id}, which is not a relative Markdown path under evidence/`);
+      markDamaged(row);
+      continue;
     }
     rows.set(row.doc_id, row);
     const documents = customers.get(row.customer_id) ?? [];
@@ -76,7 +90,7 @@ export function loadEvidenceIndex(institutionDir: string): EvidenceIndex {
     try {
       const file = realpathSync(resolve(root, row.file));
       if (!within(evidenceDir, file)) throw new Error("document resolves outside the evidence directory");
-      markdown = readFileSync(file, "utf8");
+      markdown = stripBom(readFileSync(file, "utf8"));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`Cannot read evidence ${row.doc_id} (${row.file}): ${message}`, { cause: error });
@@ -93,5 +107,6 @@ export function loadEvidenceIndex(institutionDir: string): EvidenceIndex {
       return row && load(row);
     },
     documentsForCustomer: (customerId) => (customers.get(customerId) ?? []).map(load),
+    damagedCustomers,
   };
 }

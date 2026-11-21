@@ -1,5 +1,6 @@
 import { readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
+import { stripBom, warn } from "./diagnostics.js";
 import { loadEvidenceIndex, type EvidenceDocument } from "./evidence.js";
 
 type Row = Readonly<Record<string, unknown>>;
@@ -66,21 +67,52 @@ function bankCustomer(row: Row): row is BankCustomer {
   return text(row.customer_id) && text(row.name);
 }
 
+/**
+ * Valid rows by ID. A bad row is skipped with a warning rather than aborting the run; when it still names a
+ * customer, that customer is marked damaged so their cases fall back to escalation instead of being decided
+ * on an incomplete record. A duplicate ID keeps the first row and marks both rows' customers.
+ */
 function indexRows<T extends Row, K extends keyof T>(
-  path: string, valid: (row: Row) => row is T, idKey: K,
+  path: string, valid: (row: Row) => row is T, idKey: K, damaged: Set<string>,
 ): Map<T[K], T> {
   const result = new Map<T[K], T>();
-  for (const [i, line] of readFileSync(path, "utf8").split(/\r?\n/).entries()) {
+  const markDamaged = (row: unknown) => { if (isRow(row) && text(row.customer_id)) damaged.add(row.customer_id); };
+  for (const [i, line] of stripBom(readFileSync(path, "utf8")).split(/\r?\n/).entries()) {
     if (!line.trim()) continue;
     let row: unknown;
     try { row = JSON.parse(line); }
-    catch (cause) { throw new Error(`${path}:${i + 1}: invalid JSON`, { cause }); }
-    if (!isRow(row) || !valid(row)) throw new Error(`${path}:${i + 1}: invalid row`);
+    catch { warn(`${path}:${i + 1}: skipped invalid JSON`); continue; }
+    if (!isRow(row) || !valid(row)) { warn(`${path}:${i + 1}: skipped invalid row`); markDamaged(row); continue; }
     const id = row[idKey];
-    if (result.has(id)) throw new Error(`${path}:${i + 1}: duplicate ID ${String(id)}`);
+    const first = result.get(id);
+    if (first) { warn(`${path}:${i + 1}: skipped duplicate ID ${String(id)}`); markDamaged(row); markDamaged(first); continue; }
     result.set(id, row);
   }
   return result;
+}
+
+/** What is needed to write a fallback verdict for a case, even when its record fails validation. */
+export interface CaseStub { readonly case_id: string; readonly alert_ids: readonly string[] }
+
+/** Every case row with a usable case ID, in file order, plus the subset that passed validation. */
+function indexCases(path: string): { order: CaseStub[]; valid: Map<string, BankCase> } {
+  const order: CaseStub[] = [];
+  const valid = new Map<string, BankCase>();
+  const seen = new Set<string>();
+  for (const [i, line] of stripBom(readFileSync(path, "utf8")).split(/\r?\n/).entries()) {
+    if (!line.trim()) continue;
+    let row: unknown;
+    try { row = JSON.parse(line); }
+    catch { warn(`${path}:${i + 1}: skipped invalid JSON; no case ID can be recovered`); continue; }
+    if (!isRow(row) || !text(row.case_id)) { warn(`${path}:${i + 1}: skipped a row without a case ID`); continue; }
+    if (seen.has(row.case_id)) { warn(`${path}:${i + 1}: skipped duplicate case ID ${row.case_id}`); continue; }
+    seen.add(row.case_id);
+    const alertIds = Array.isArray(row.alert_ids) ? row.alert_ids.filter(text) : [];
+    order.push({ case_id: row.case_id, alert_ids: alertIds });
+    if (bankCase(row)) valid.set(row.case_id, row);
+    else warn(`${path}:${i + 1}: case ${row.case_id} is malformed and will be escalated`);
+  }
+  return { order, valid };
 }
 
 function listEntry(row: Row): row is ListEntry { return text(row.entry_id) && text(row.name); }
@@ -108,22 +140,26 @@ function loadCases(directory: string, bankDiagnostic: boolean) {
     }
     return path;
   }
-  const cases = indexRows(input("cases.jsonl"), bankCase, "case_id");
-  const alerts = indexRows(input("alerts.jsonl"), bankAlert, "alert_id");
-  const transactions = indexRows(input("transactions.jsonl"), bankTransaction, "transaction_id");
-  const customers = indexRows(input("customers.jsonl"), bankCustomer, "customer_id");
+  const damaged = new Set<string>();
+  const { order, valid: cases } = indexCases(input("cases.jsonl"));
+  const alerts = indexRows(input("alerts.jsonl"), bankAlert, "alert_id", damaged);
+  const transactions = indexRows(input("transactions.jsonl"), bankTransaction, "transaction_id", damaged);
+  const customers = indexRows(input("customers.jsonl"), bankCustomer, "customer_id", damaged);
   const evidence = loadEvidenceIndex(root);
   const caseInstitutions = new Set([...cases.values()].map((record) => record.institution));
-  if (caseInstitutions.size > 1 || (bankDiagnostic && [...caseInstitutions].some((value) => value !== "bank"))) {
-    throw new Error(bankDiagnostic ? "Expected Bank case records" : "Input folder mixes institutions");
-  }
+  if (bankDiagnostic && [...caseInstitutions].some((value) => value !== "bank")) throw new Error("Expected Bank case records");
+  // Each case is decided under its own institution's rules, so a mixed folder is worth a warning, not an abort.
+  if (caseInstitutions.size > 1) warn(`cases.jsonl mixes institutions (${[...caseInstitutions].join(", ")})`);
   const txByCustomer = groupByCustomer(transactions.values());
-  const internalList = bankDiagnostic ? [] : [...indexRows(input("internal_list.jsonl"), listEntry, "entry_id").values()];
-  const reviewsByCustomer = groupByCustomer(bankDiagnostic ? [] : indexRows(input("previous_reviews.jsonl"), previousReview, "review_id").values());
+  const internalList = bankDiagnostic ? [] : [...indexRows(input("internal_list.jsonl"), listEntry, "entry_id", damaged).values()];
+  const reviewsByCustomer = groupByCustomer(bankDiagnostic ? [] : indexRows(input("previous_reviews.jsonl"), previousReview, "review_id", damaged).values());
 
   function get(caseId: string): InstitutionCasePack {
     const caseRecord = cases.get(caseId);
-    if (!caseRecord) throw new Error(`Unknown Bank case ${caseId}`);
+    if (!caseRecord) throw new Error(order.some((stub) => stub.case_id === caseId) ? `${caseId}: malformed case record` : `Unknown case ${caseId}`);
+    if (damaged.has(caseRecord.customer_id) || evidence.damagedCustomers.has(caseRecord.customer_id)) {
+      throw new Error(`${caseId}: some input records for customer ${caseRecord.customer_id} could not be read`);
+    }
     const customer = customers.get(caseRecord.customer_id);
     if (!customer) throw new Error(`${caseId}: missing customer ${caseRecord.customer_id}`);
     const flagged = new Map<string, BankTransaction>();
@@ -158,7 +194,8 @@ function loadCases(directory: string, bankDiagnostic: boolean) {
       previousReviews: reviewsByCustomer.get(customer.customer_id) ?? [], internalList };
   }
 
-  return { root, caseIds: [...cases.keys()], get };
+  const stubs = new Map(order.map((stub) => [stub.case_id, stub]));
+  return { root, caseIds: order.map((stub) => stub.case_id), get, stub: (caseId: string) => stubs.get(caseId) };
 }
 
 export function loadBankCases(directory: string) { return loadCases(directory, true); }

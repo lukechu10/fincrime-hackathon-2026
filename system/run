@@ -1,12 +1,21 @@
 #!/usr/bin/env node
 
 // src/submission.ts
-import { lstatSync, realpathSync as realpathSync3, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, realpathSync as realpathSync3, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute as isAbsolute3, join as join2, relative as relative3, resolve as resolve2, sep as sep3 } from "node:path";
 
 // src/bank-cases.ts
 import { readFileSync as readFileSync2, realpathSync as realpathSync2 } from "node:fs";
 import { isAbsolute as isAbsolute2, join, relative as relative2, sep as sep2 } from "node:path";
+
+// src/diagnostics.ts
+function warn(message) {
+  process.stderr.write(`run: warning: ${message}
+`);
+}
+function stripBom(text2) {
+  return text2.charCodeAt(0) === 65279 ? text2.slice(1) : text2;
+}
 
 // src/evidence.ts
 import { readFileSync, realpathSync } from "node:fs";
@@ -215,19 +224,37 @@ function loadEvidenceIndex(institutionDir) {
   const rows = /* @__PURE__ */ new Map();
   const customers = /* @__PURE__ */ new Map();
   const cache = /* @__PURE__ */ new Map();
-  for (const [i, line] of readFileSync(indexFile, "utf8").split(/\r?\n/).entries()) {
+  const damagedCustomers = /* @__PURE__ */ new Set();
+  const markDamaged = (row) => {
+    const customer = typeof row === "object" && row !== null ? row.customer_id : void 0;
+    if (typeof customer === "string" && customer.trim()) damagedCustomers.add(customer);
+  };
+  for (const [i, line] of stripBom(readFileSync(indexFile, "utf8")).split(/\r?\n/).entries()) {
     if (!line.trim()) continue;
     const location = `${indexFile}:${i + 1}`;
     let row;
     try {
       row = JSON.parse(line);
-    } catch (error) {
-      throw new Error(`${location}: invalid JSON`, { cause: error });
+    } catch {
+      warn(`${location}: skipped invalid JSON`);
+      continue;
     }
-    if (!isMetadata(row)) throw new Error(`${location}: invalid evidence metadata`);
-    if (rows.has(row.doc_id)) throw new Error(`${location}: duplicate evidence ID ${row.doc_id}`);
+    if (!isMetadata(row)) {
+      warn(`${location}: skipped invalid evidence metadata`);
+      markDamaged(row);
+      continue;
+    }
+    const first = rows.get(row.doc_id);
+    if (first) {
+      warn(`${location}: skipped duplicate evidence ID ${row.doc_id}`);
+      markDamaged(row);
+      markDamaged(first);
+      continue;
+    }
     if (isAbsolute(row.file) || !row.file.endsWith(".md") || !within(evidenceDir, resolve(root, row.file))) {
-      throw new Error(`${location}: expected a relative Markdown path under evidence/ for ${row.doc_id}`);
+      warn(`${location}: skipped ${row.doc_id}, which is not a relative Markdown path under evidence/`);
+      markDamaged(row);
+      continue;
     }
     rows.set(row.doc_id, row);
     const documents = customers.get(row.customer_id) ?? [];
@@ -241,7 +268,7 @@ function loadEvidenceIndex(institutionDir) {
     try {
       const file = realpathSync(resolve(root, row.file));
       if (!within(evidenceDir, file)) throw new Error("document resolves outside the evidence directory");
-      markdown = readFileSync(file, "utf8");
+      markdown = stripBom(readFileSync(file, "utf8"));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`Cannot read evidence ${row.doc_id} (${row.file}): ${message}`, { cause: error });
@@ -256,7 +283,8 @@ function loadEvidenceIndex(institutionDir) {
       const row = rows.get(docId);
       return row && load(row);
     },
-    documentsForCustomer: (customerId) => (customers.get(customerId) ?? []).map(load)
+    documentsForCustomer: (customerId) => (customers.get(customerId) ?? []).map(load),
+    damagedCustomers
   };
 }
 
@@ -284,22 +312,65 @@ function bankTransaction(row) {
 function bankCustomer(row) {
   return text(row.customer_id) && text(row.name);
 }
-function indexRows(path, valid, idKey) {
+function indexRows(path, valid, idKey, damaged) {
   const result = /* @__PURE__ */ new Map();
-  for (const [i, line] of readFileSync2(path, "utf8").split(/\r?\n/).entries()) {
+  const markDamaged = (row) => {
+    if (isRow(row) && text(row.customer_id)) damaged.add(row.customer_id);
+  };
+  for (const [i, line] of stripBom(readFileSync2(path, "utf8")).split(/\r?\n/).entries()) {
     if (!line.trim()) continue;
     let row;
     try {
       row = JSON.parse(line);
-    } catch (cause) {
-      throw new Error(`${path}:${i + 1}: invalid JSON`, { cause });
+    } catch {
+      warn(`${path}:${i + 1}: skipped invalid JSON`);
+      continue;
     }
-    if (!isRow(row) || !valid(row)) throw new Error(`${path}:${i + 1}: invalid row`);
+    if (!isRow(row) || !valid(row)) {
+      warn(`${path}:${i + 1}: skipped invalid row`);
+      markDamaged(row);
+      continue;
+    }
     const id = row[idKey];
-    if (result.has(id)) throw new Error(`${path}:${i + 1}: duplicate ID ${String(id)}`);
+    const first = result.get(id);
+    if (first) {
+      warn(`${path}:${i + 1}: skipped duplicate ID ${String(id)}`);
+      markDamaged(row);
+      markDamaged(first);
+      continue;
+    }
     result.set(id, row);
   }
   return result;
+}
+function indexCases(path) {
+  const order = [];
+  const valid = /* @__PURE__ */ new Map();
+  const seen = /* @__PURE__ */ new Set();
+  for (const [i, line] of stripBom(readFileSync2(path, "utf8")).split(/\r?\n/).entries()) {
+    if (!line.trim()) continue;
+    let row;
+    try {
+      row = JSON.parse(line);
+    } catch {
+      warn(`${path}:${i + 1}: skipped invalid JSON; no case ID can be recovered`);
+      continue;
+    }
+    if (!isRow(row) || !text(row.case_id)) {
+      warn(`${path}:${i + 1}: skipped a row without a case ID`);
+      continue;
+    }
+    if (seen.has(row.case_id)) {
+      warn(`${path}:${i + 1}: skipped duplicate case ID ${row.case_id}`);
+      continue;
+    }
+    seen.add(row.case_id);
+    const alertIds = Array.isArray(row.alert_ids) ? row.alert_ids.filter(text) : [];
+    order.push({ case_id: row.case_id, alert_ids: alertIds });
+    if (bankCase(row)) valid.set(row.case_id, row);
+    else warn(`${path}:${i + 1}: case ${row.case_id} is malformed and will be escalated`);
+  }
+  return { order, valid };
 }
 function listEntry(row) {
   return text(row.entry_id) && text(row.name);
@@ -326,21 +397,24 @@ function loadCases(directory, bankDiagnostic) {
     }
     return path;
   }
-  const cases = indexRows(input("cases.jsonl"), bankCase, "case_id");
-  const alerts = indexRows(input("alerts.jsonl"), bankAlert, "alert_id");
-  const transactions = indexRows(input("transactions.jsonl"), bankTransaction, "transaction_id");
-  const customers = indexRows(input("customers.jsonl"), bankCustomer, "customer_id");
+  const damaged = /* @__PURE__ */ new Set();
+  const { order, valid: cases } = indexCases(input("cases.jsonl"));
+  const alerts = indexRows(input("alerts.jsonl"), bankAlert, "alert_id", damaged);
+  const transactions = indexRows(input("transactions.jsonl"), bankTransaction, "transaction_id", damaged);
+  const customers = indexRows(input("customers.jsonl"), bankCustomer, "customer_id", damaged);
   const evidence = loadEvidenceIndex(root);
   const caseInstitutions = new Set([...cases.values()].map((record3) => record3.institution));
-  if (caseInstitutions.size > 1 || bankDiagnostic && [...caseInstitutions].some((value) => value !== "bank")) {
-    throw new Error(bankDiagnostic ? "Expected Bank case records" : "Input folder mixes institutions");
-  }
+  if (bankDiagnostic && [...caseInstitutions].some((value) => value !== "bank")) throw new Error("Expected Bank case records");
+  if (caseInstitutions.size > 1) warn(`cases.jsonl mixes institutions (${[...caseInstitutions].join(", ")})`);
   const txByCustomer = groupByCustomer(transactions.values());
-  const internalList = bankDiagnostic ? [] : [...indexRows(input("internal_list.jsonl"), listEntry, "entry_id").values()];
-  const reviewsByCustomer = groupByCustomer(bankDiagnostic ? [] : indexRows(input("previous_reviews.jsonl"), previousReview, "review_id").values());
+  const internalList = bankDiagnostic ? [] : [...indexRows(input("internal_list.jsonl"), listEntry, "entry_id", damaged).values()];
+  const reviewsByCustomer = groupByCustomer(bankDiagnostic ? [] : indexRows(input("previous_reviews.jsonl"), previousReview, "review_id", damaged).values());
   function get(caseId) {
     const caseRecord = cases.get(caseId);
-    if (!caseRecord) throw new Error(`Unknown Bank case ${caseId}`);
+    if (!caseRecord) throw new Error(order.some((stub) => stub.case_id === caseId) ? `${caseId}: malformed case record` : `Unknown case ${caseId}`);
+    if (damaged.has(caseRecord.customer_id) || evidence.damagedCustomers.has(caseRecord.customer_id)) {
+      throw new Error(`${caseId}: some input records for customer ${caseRecord.customer_id} could not be read`);
+    }
     const customer = customers.get(caseRecord.customer_id);
     if (!customer) throw new Error(`${caseId}: missing customer ${caseRecord.customer_id}`);
     const flagged = /* @__PURE__ */ new Map();
@@ -383,7 +457,8 @@ function loadCases(directory, bankDiagnostic) {
       internalList
     };
   }
-  return { root, caseIds: [...cases.keys()], get };
+  const stubs = new Map(order.map((stub) => [stub.case_id, stub]));
+  return { root, caseIds: order.map((stub) => stub.case_id), get, stub: (caseId) => stubs.get(caseId) };
 }
 function loadInstitutionCases(directory) {
   return loadCases(directory, false);
@@ -2131,26 +2206,49 @@ function verify(pack, result) {
     throw new Error(`${case_id}: invalid evidence reference`);
   }
 }
+function fallbackDecision(stub) {
+  return {
+    case_id: stub.case_id,
+    alert_ids: [...stub.alert_ids],
+    verdict: "ESCALATE",
+    reason_code: "ESC_UNEXPLAINED_FUNDS",
+    reason: "The automated review could not assess this case because some of its input records could not be read or checked. Without them the flagged activity is not shown to be explained, so refer the case to the MLRO for manual review without contacting the customer.",
+    evidence: []
+  };
+}
+var inside = (base, path) => {
+  const sub = relative3(base, path);
+  return !sub || sub !== ".." && !sub.startsWith(`..${sep3}`) && !isAbsolute3(sub);
+};
 function runSubmission(input, output) {
   const target = resolve2(output);
-  const canonical = join2(realpathSync3(dirname(target)), basename(target));
   const inputRoot = realpathSync3(input);
-  const sub = relative3(inputRoot, canonical);
-  if (!sub || sub !== ".." && !sub.startsWith(`..${sep3}`) && !isAbsolute3(sub)) {
-    throw new Error("Output must not overwrite or be placed inside the supplied institution directory");
-  }
+  const refuse = () => new Error("Output must not overwrite or be placed inside the supplied institution directory");
+  if (inside(resolve2(input), target) || inside(inputRoot, target)) throw refuse();
+  mkdirSync(dirname(target), { recursive: true });
+  const canonical = join2(realpathSync3(dirname(target)), basename(target));
+  if (inside(inputRoot, canonical)) throw refuse();
   const existing = lstatSync(canonical, { throwIfNoEntry: false });
   if (existing && (!existing.isFile() || existing.nlink > 1)) {
     throw new Error("Output path must be a regular, unshared file");
   }
   const reader = loadInstitutionCases(inputRoot);
   const lines = [];
+  let fallbacks = 0;
   for (const id of reader.caseIds) {
-    const pack = reader.get(id);
-    const result = decideCase(pack);
-    verify(pack, result);
+    let result;
+    try {
+      const pack = reader.get(id);
+      result = decideCase(pack);
+      verify(pack, result);
+    } catch (error) {
+      warn(`${error instanceof Error ? error.message : String(error)}; escalating ${id}`);
+      result = fallbackDecision(reader.stub(id) ?? { case_id: id, alert_ids: [] });
+      fallbacks++;
+    }
     lines.push(JSON.stringify(result));
   }
+  if (fallbacks) warn(`${fallbacks} of ${lines.length} cases could not be assessed and were escalated`);
   writeFileSync(canonical, lines.length ? `${lines.join("\n")}
 ` : "", "utf8");
 }

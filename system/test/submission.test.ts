@@ -70,11 +70,58 @@ test("fraud evidence takes precedence over an otherwise reconciled case", (t) =>
   assert.ok(result.evidence.includes("DOC-RPT"));
 });
 
-test("malformed data cannot overwrite an existing output or the input files", (t) => {
+const readOne = (output: string) => {
+  const lines = readFileSync(output, "utf8").trim().split("\n");
+  assert.equal(lines.length, 1);
+  return JSON.parse(lines[0]);
+};
+const assertFallback = (result: Record<string, unknown>, alertIds: string[]) => {
+  assert.equal(result.case_id, "CASE-1");
+  assert.deepEqual(result.alert_ids, alertIds);
+  assert.equal(result.verdict, "ESCALATE");
+  assert.equal(result.reason_code, "ESC_UNEXPLAINED_FUNDS");
+  assert.deepEqual(result.evidence, []);
+};
+
+test("a case whose records cannot be joined is escalated instead of aborting the run", (t) => {
   const { input, output, write } = fixture(t, "bank");
-  writeFileSync(output, "previous result\n");
   write("alerts", []);
-  assert.throws(() => runSubmission(input, output), /missing or unrelated alert/);
-  assert.equal(readFileSync(output, "utf8"), "previous result\n");
+  runSubmission(input, output);
+  assertFallback(readOne(output), ["AL-1"]);
+});
+
+test("the output path may not be inside the input folder, and missing output folders are created", (t) => {
+  const { input, output } = fixture(t, "bank");
   assert.throws(() => runSubmission(input, join(input, "cases.jsonl")), /must not overwrite/);
+  assert.throws(() => runSubmission(input, join(input, "new", "out.jsonl")), /must not overwrite/);
+  const nested = join(output, "..", "made", "for", "this", "run.jsonl");
+  runSubmission(input, nested);
+  assert.equal(readOne(nested).case_id, "CASE-1");
+});
+
+test("a bad row naming the customer escalates their case; unrelated bad rows are skipped", (t) => {
+  const { input, output } = fixture(t, "bank");
+  const decided = () => { runSubmission(input, output); return readOne(output); };
+  const baseline = decided();
+  assert.notEqual(baseline.reason_code, "ESC_UNEXPLAINED_FUNDS");
+  // An unreadable line and a row for another customer leave this case's records intact.
+  const transactions = join(input, "transactions.jsonl");
+  const original = readFileSync(transactions, "utf8");
+  writeFileSync(transactions, `﻿${original}\n{not json\n${JSON.stringify({ transaction_id: "TX-9", customer_id: "OTHER", amount_gbp: -1 })}\n`);
+  assert.deepEqual(decided(), baseline);
+  // An invalid transaction for this customer means the evidence pack is incomplete.
+  writeFileSync(transactions, `${original}\n${JSON.stringify({ transaction_id: "TX-2", customer_id: "PERSON-1", amount_gbp: -1 })}\n`);
+  assertFallback(decided(), ["AL-1"]);
+});
+
+test("a malformed case record or unreadable document still yields a line for that case", (t) => {
+  const { input, output, write } = fixture(t, "bank");
+  write("cases", [{ case_id: "CASE-1", customer_id: "PERSON-1", institution: "bank", review_window: { from: "2026-09-30", to: "2026-09-01" }, alert_ids: ["AL-1"] }]);
+  runSubmission(input, output);
+  assertFallback(readOne(output), ["AL-1"]);
+
+  const second = fixture(t, "bank");
+  rmSync(join(second.input, "evidence", "DOC-KYC.md"));
+  runSubmission(second.input, second.output);
+  assertFallback(readOne(second.output), ["AL-1"]);
 });

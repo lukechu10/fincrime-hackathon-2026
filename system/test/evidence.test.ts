@@ -107,18 +107,27 @@ test("indexes by customer, reads documents lazily, and caches original text and 
   assert.throws(() => index.get("MISSING"), /Cannot read evidence MISSING/);
 });
 
-test("reports invalid metadata and clear file/line locations", (t) => {
+test("skips invalid metadata rows and marks the customer they name as damaged", (t) => {
   const root = fixture(t, [metadata("DUP"), metadata("DUP")]);
-  assert.throws(() => loadEvidenceIndex(root), /evidence\.jsonl:2: duplicate evidence ID DUP/);
+  const duplicate = loadEvidenceIndex(root);
+  assert.deepEqual(duplicate.metadataForCustomer("ABC").map((r) => r.doc_id), ["DUP"]);
+  assert.ok(duplicate.damagedCustomers.has("ABC"));
   writeFileSync(join(root, "evidence.jsonl"), "{bad json}\n");
-  assert.throws(() => loadEvidenceIndex(root), /evidence\.jsonl:1: invalid JSON/);
-  writeFileSync(join(root, "evidence.jsonl"), "{}\n");
-  assert.throws(() => loadEvidenceIndex(root), /evidence\.jsonl:1: invalid evidence metadata/);
+  assert.equal(loadEvidenceIndex(root).damagedCustomers.size, 0);
+  writeFileSync(join(root, "evidence.jsonl"), `${JSON.stringify({ customer_id: "XYZ" })}\n`);
+  assert.deepEqual([...loadEvidenceIndex(root).damagedCustomers], ["XYZ"]);
+  // A byte-order mark at the start of the file is not an invalid row.
+  writeFileSync(join(root, "evidence.jsonl"), `﻿${JSON.stringify(metadata("BOM"))}\n`);
+  const bom = loadEvidenceIndex(root);
+  assert.deepEqual(bom.metadataForCustomer("ABC").map((r) => r.doc_id), ["BOM"]);
+  assert.equal(bom.damagedCustomers.size, 0);
 });
 
 test("rejects document paths and symlinks escaping the evidence folder", (t) => {
   const root = fixture(t, [{ ...metadata("OUTSIDE"), file: "../outside.md" }]);
-  assert.throws(() => loadEvidenceIndex(root), /expected a relative Markdown path under evidence/);
+  const escaped = loadEvidenceIndex(root);
+  assert.equal(escaped.get("OUTSIDE"), undefined);
+  assert.ok(escaped.damagedCustomers.has("ABC"));
   writeFileSync(join(root, "evidence.jsonl"), JSON.stringify(metadata("OUTSIDE")));
   writeFileSync(join(root, "outside.md"), "Not an evidence document");
   symlinkSync("../outside.md", join(root, "evidence/OUTSIDE.md"));

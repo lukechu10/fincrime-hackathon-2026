@@ -12,7 +12,17 @@ It also works from inside `system/` with absolute paths:
 ./run /absolute/path/to/institutions/bank /absolute/path/to/output/bank.jsonl
 ```
 
-The output directory must already exist. The runner writes exactly one JSON line per input case, in input order and with all alert IDs. It validates the case and alert references, verdict/reason-code pairs, and cited IDs before writing. Errors go to stderr and exit nonzero. Node.js 24+ is the only runtime requirement; no npm install, network, API key, or prior development run is required at evaluation time.
+Missing output folders are created; the output may not be placed inside the input folder. The runner writes exactly one JSON line per input case, in input order and with all alert IDs. It validates the case and alert references, verdict/reason-code pairs, and cited IDs before writing.
+
+Bad input does not stop the run:
+- **Bad rows:** an unreadable line or invalid row is skipped, with a warning on stderr. A leading byte-order mark is ignored.
+- **Fallback to ESCALATE:** the case becomes `ESCALATE` with `ESC_UNEXPLAINED_FUNDS`, all of its alert IDs and no cited evidence when:
+  - a skipped row or evidence entry still names the case's customer, so their records may be incomplete;
+  - the case's own record is malformed;
+  - its alert, transaction, customer or document cannot be joined or read;
+  - deciding it throws an error or fails validation.
+- **Other cases are unaffected.**
+- **Exit codes:** the runner exits nonzero only for usage errors, an unreadable input folder, or an output path it refuses. Node.js 24+ is the only runtime requirement; no npm install, network, API key, or prior development run is required at evaluation time.
 
 ## How it decides
 

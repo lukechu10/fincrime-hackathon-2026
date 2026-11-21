@@ -63,8 +63,26 @@ Update this section when changing decision logic or completing a review round. R
   - **Prose parsers:** every free-text document is a unique paraphrase. The credit-letter parser written from the first Bank sample covered 192 of the 281 letters that today's dev-widened parser accepts. One plausible rewording drops every solicitor-letter close (38/38) and 90 of the 140 gift-letter cases, and removes all 16 structuring escalations from staff notes. Expect some misses on unseen paraphrases.
   - **Labels are not independent:** the labels were written by the same agent in the same session as the engine, so a cost of 0 shows self-agreement, not accuracy.
 - **Fixed the three submission audit blockers:** TM02 now requires support for each material flagged onward payment as well as the existing inflow check. Payments/FX always assesses and cites the actual held payment: a same-name destination needs ownership evidence for the £10,000 exemption, and a uniquely matched same-day merchant receipt can support a smaller payment without replacing the large-payment invoice or contract. Ordinary invoice matching now uses one path with one-to-one reconciliation, and a linked invoice naming a conflicting beneficiary escalates even when another invoice matches. Added six regression tests; all 58 and typecheck passed. Rebuilt the bundle and regenerated all four development files; five runs per institution reproduced them byte-for-byte. The local score is now 156 verdict-cost points and zero labelled wrongful closes: 52 e-money TM02 CLOSEs became RFIs for uncited onward activity; no other verdicts changed. Review whether those small movements are part of the alerted flow or independently explained before relaxing the rule.
+- **Per-case fallback (no verdict logic changed):**
+  - **What changed:** loaders now skip bad rows with a stderr warning instead of throwing, and ignore a leading byte-order mark. A case is escalated with `ESC_UNEXPLAINED_FUNDS`, its alert IDs and no evidence when any of these holds:
+    - its record is malformed;
+    - a skipped row or evidence entry names its customer;
+    - a join or document read fails;
+    - deciding it throws or fails validation.
+
+    Missing output folders are created.
+  - **Fault injection:** each copy of the Bank folder had one change: a byte-order mark, an empty counterparty, a negative amount, a null review note, a null document date, a deleted evidence file, a removed customer, or a bad alert line. Every copy now writes 1,000 lines with at most one case changed; before, each one aborted with no output.
+  - **Verification:**
+    - Development outputs are byte-identical to the previous commit, and identical across five runs. The local score is unchanged at 156.
+    - Synthetic cases: unchanged at cost 12, zero wrongful closes, 16/16 reproducible.
+    - Tests: 61, all passing except the Windows symlink test.
+  - **Synthetic misses:** the four remaining misses are wording-dependent parses:
+    - a reworded structuring note becomes an RFI instead of escalating;
+    - a redundancy redemption becomes an RFI instead of closing;
+    - a refund whose original payment is outside the window becomes an RFI;
+    - an invoice diversion becomes an RFI instead of escalating.
 - **Next priority:**
-  - **Add a per-case fallback** to ESCALATE, and make loaders skip bad rows with a warning instead of aborting.
+  - **Make the escalation signals robust to rewording** (structuring notes, invoice diversion); the synthetic suite shows both falling to RFI.
   - **Measure generalization:** hand-check a fresh stratified sample of outputs, especially every CLOSE path, for wording and evidence quality.
   - **Stress-test trap variants** by mutating development cases: change an amount, donor, account or date, and confirm closes fall away.
   - **Decide the no-document TM08 reason code.**
