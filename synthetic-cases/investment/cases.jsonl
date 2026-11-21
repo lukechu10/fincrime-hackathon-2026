@@ -1,0 +1,4 @@
+{"case_id":"SYN-IV-01-CS","institution":"investment","customer_id":"SYN-IV-01-C","opened_at":"2026-10-20T06:00:00Z","review_window":{"from":"2026-09-20","to":"2026-10-19"},"alert_ids":["SYN-IV-01-AL01"],"held_payment_id":null}
+{"case_id":"SYN-IV-02-CS","institution":"investment","customer_id":"SYN-IV-02-C","opened_at":"2026-10-20T06:00:00Z","review_window":{"from":"2026-09-20","to":"2026-10-19"},"alert_ids":["SYN-IV-02-AL01","SYN-IV-02-AL02"],"held_payment_id":null}
+{"case_id":"SYN-IV-03-CS","institution":"investment","customer_id":"SYN-IV-03-C","opened_at":"2026-10-20T06:00:00Z","review_window":{"from":"2026-09-20","to":"2026-10-19"},"alert_ids":["SYN-IV-03-AL01"],"held_payment_id":null}
+{"case_id":"SYN-IV-04-CS","institution":"investment","customer_id":"SYN-IV-04-C","opened_at":"2026-10-20T06:00:00Z","review_window":{"from":"2026-09-20","to":"2026-10-19"},"alert_ids":["SYN-IV-04-AL01","SYN-IV-04-AL02"],"held_payment_id":null}

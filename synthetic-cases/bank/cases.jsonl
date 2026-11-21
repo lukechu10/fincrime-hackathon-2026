@@ -1,0 +1,4 @@
+{"case_id":"SYN-BK-01-CS","institution":"bank","customer_id":"SYN-BK-01-C","opened_at":"2026-10-20T06:00:00Z","review_window":{"from":"2026-09-20","to":"2026-10-19"},"alert_ids":["SYN-BK-01-AL01"],"held_payment_id":null}
+{"case_id":"SYN-BK-02-CS","institution":"bank","customer_id":"SYN-BK-02-C","opened_at":"2026-10-20T06:00:00Z","review_window":{"from":"2026-09-20","to":"2026-10-19"},"alert_ids":["SYN-BK-02-AL01"],"held_payment_id":null}
+{"case_id":"SYN-BK-03-CS","institution":"bank","customer_id":"SYN-BK-03-C","opened_at":"2026-10-20T06:00:00Z","review_window":{"from":"2026-09-20","to":"2026-10-19"},"alert_ids":["SYN-BK-03-AL01"],"held_payment_id":null}
+{"case_id":"SYN-BK-04-CS","institution":"bank","customer_id":"SYN-BK-04-C","opened_at":"2026-10-20T06:00:00Z","review_window":{"from":"2026-09-20","to":"2026-10-19"},"alert_ids":["SYN-BK-04-AL01"],"held_payment_id":null}
