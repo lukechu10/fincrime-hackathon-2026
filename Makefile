@@ -26,7 +26,7 @@ dataset:
 	trap 'exit 1' HUP INT TERM; \
 	printf 'Downloading the official Track 1 dataset...\n'; \
 	curl --fail --silent --show-error --location --retry 2 --max-time 120 '$(DATASET_URL)' -o "$$tmp/bundle.zip"; \
-	unzip -q "$$tmp/bundle.zip" 'hackathon/README.md' 'hackathon/BRIEF.html' 'hackathon/institutions/*' -x '*/.DS_Store' -d "$$tmp"; \
+	unzip -q -W "$$tmp/bundle.zip" 'hackathon/README.md' 'hackathon/BRIEF.html' 'hackathon/institutions/**' -x '**/.DS_Store' -d "$$tmp"; \
 	if ! complete "$$tmp/hackathon"; then printf 'Download is missing expected dataset files.\n' >&2; exit 1; fi; \
 	mv "$$tmp/hackathon" "$$dest"; \
 	printf 'Dataset extracted to %s\n' "$$dest"
